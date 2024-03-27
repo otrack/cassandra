@@ -1600,7 +1600,7 @@ internode_compression: dc
 # Disabling it will result in larger (but fewer) network packets being sent,
 # reducing overhead from the TCP protocol itself, at the cost of increasing
 # latency if you block for cross-datacenter responses.
-inter_dc_tcp_nodelay: false
+inter_dc_tcp_nodelay: true
 
 # TTL for different trace types used during logging of the repair process.
 # Min unit: s
@@ -2133,12 +2133,12 @@ drop_compact_storage_enabled: false
 # - Do a rolling restart with all nodes starting with NONE. This sheds the extra cost of checking nodes versions and ensures 
 #   a stable cluster. If a node from a previous version was started by accident we won't any longer toggle behaviors as when UPGRADING.
 #
-storage_compatibility_mode: NONE
-
-lwt_strategy: accord
-non_serial_write_strategy: accord
-accord:
-    enabled: true
-    journal_directory: /tmp
-    shard_count: -1
-    progress_log_schedule_delay: 1s
+#storage_compatibility_mode: NONE
+#
+#lwt_strategy: accord
+#non_serial_write_strategy: accord
+#accord:
+#    enabled: true
+#    journal_directory: /tmp
+#    shard_count: -1
+#    progress_log_schedule_delay: 1s
