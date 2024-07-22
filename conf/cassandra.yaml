@@ -2254,3 +2254,11 @@ storage_compatibility_mode: NONE
 #
 #  # how quickly the fast path is reconfigured when nodes go up/down
 #  fast_path_update_delay: 5s
+
+lwt_strategy: accord
+non_serial_write_strategy: accord
+accord:
+    enabled: true
+    journal_directory: /tmp
+    shard_count: -1
+    progress_log_schedule_delay: 1s
