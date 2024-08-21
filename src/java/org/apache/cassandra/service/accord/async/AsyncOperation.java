@@ -17,7 +17,9 @@
  */
 package org.apache.cassandra.service.accord.async;
 
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.TreeMap;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
@@ -29,6 +31,7 @@ import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
 
 import accord.api.Key;
+import accord.local.Command;
 import accord.local.CommandStore;
 import accord.local.PreLoadContext;
 import accord.local.SafeCommandStore;
@@ -36,6 +39,7 @@ import accord.primitives.Seekables;
 import accord.primitives.TxnId;
 import accord.utils.Invariants;
 import accord.utils.async.AsyncChains;
+import org.apache.cassandra.config.CassandraRelevantProperties;
 import org.apache.cassandra.service.accord.AccordCommandStore;
 import org.apache.cassandra.service.accord.AccordSafeCommand;
 import org.apache.cassandra.service.accord.AccordSafeCommandStore;
@@ -43,6 +47,7 @@ import org.apache.cassandra.service.accord.AccordSafeCommandsForKey;
 import org.apache.cassandra.service.accord.AccordSafeCommandsForRanges;
 import org.apache.cassandra.service.accord.AccordSafeState;
 import org.apache.cassandra.service.accord.AccordSafeTimestampsForKey;
+import org.apache.cassandra.service.accord.SavedCommand;
 
 import static org.apache.cassandra.service.accord.async.AsyncLoader.txnIds;
 import static org.apache.cassandra.service.accord.async.AsyncOperation.State.COMPLETING;
@@ -73,9 +78,13 @@ public abstract class AsyncOperation<R> extends AsyncChains.Head<R> implements R
 
         void releaseResources(AccordCommandStore commandStore)
         {
+            // TODO (expected): we should destructively iterate to avoid invoking second time in fail; or else read and set to null
             commands.values().forEach(commandStore.commandCache()::release);
+            commands.clear();
             timestampsForKey.values().forEach(commandStore.timestampsForKeyCache()::release);
+            timestampsForKey.clear();
             commandsForKey.values().forEach(commandStore.commandsForKeyCache()::release);
+            commandsForKey.clear();
         }
 
         void revertChanges()
@@ -90,7 +99,7 @@ public abstract class AsyncOperation<R> extends AsyncChains.Head<R> implements R
 
     enum State
     {
-        INITIALIZED, LOADING, PREPARING, RUNNING, COMPLETING, FINISHED, FAILED;
+        INITIALIZED, LOADING, PREPARING, RUNNING, COMPLETING, AWAITING_FLUSH, FINISHED, FAILED;
 
         boolean isComplete()
         {
@@ -107,6 +116,8 @@ public abstract class AsyncOperation<R> extends AsyncChains.Head<R> implements R
     private R result;
     private final String loggingId;
     private BiConsumer<? super R, Throwable> callback;
+
+    private List<Command> sanityCheck = null;
 
     private void setLoggingIds()
     {
@@ -159,11 +170,6 @@ public abstract class AsyncOperation<R> extends AsyncChains.Head<R> implements R
         }
     }
 
-    void onUnblocked()
-    {
-        commandStore.executor().execute(this);
-    }
-
     private void state(State state)
     {
         this.state = state;
@@ -180,12 +186,6 @@ public abstract class AsyncOperation<R> extends AsyncChains.Head<R> implements R
         {
             state(failure == null ? FINISHED : FAILED);
         }
-    }
-
-    @Nullable
-    TxnId primaryTxnId()
-    {
-        return preLoadContext.primaryTxnId();
     }
 
     @SuppressWarnings("unchecked")
@@ -215,7 +215,6 @@ public abstract class AsyncOperation<R> extends AsyncChains.Head<R> implements R
                     commandStore.abortCurrentOperation();
                 case LOADING:
                     context.releaseResources(commandStore);
-                    commandStore.executionOrder().unregisterOutOfOrder(this);
                 case INITIALIZED:
                     break; // nothing to clean up, call callback
             }
@@ -231,32 +230,54 @@ public abstract class AsyncOperation<R> extends AsyncChains.Head<R> implements R
         finish(null, throwable);
     }
 
-    protected void runInternal()
+    // return true iff ready to run
+    protected boolean runInternal(boolean loadOnly)
     {
-        Boolean canRun = null;
         switch (state)
         {
             default: throw new IllegalStateException("Unexpected state " + state);
             case INITIALIZED:
-                canRun = commandStore.executionOrder().register(this);
-                if (Invariants.isParanoid())
-                    Invariants.checkState(canRun.booleanValue() == commandStore.executionOrder().canRun(this), "Register of %s returned canRun=%s but canRun returned %s!", this, canRun, !canRun);
                 state(LOADING);
             case LOADING:
-                if (null == canRun)
-                    canRun = commandStore.executionOrder().canRun(this);
-                if (!loader.load(context, this::onLoaded) || !canRun)
-                    return;
+                if (!loader.load(context, this::onLoaded))
+                    return false;
                 state(PREPARING);
+                if (loadOnly)
+                    return true;
             case PREPARING:
                 safeStore = commandStore.beginOperation(preLoadContext, context.commands, context.timestampsForKey, context.commandsForKey, context.commandsForRanges);
                 state(RUNNING);
             case RUNNING:
+
                 result = apply(safeStore);
-                safeStore.postExecute(context.commands, context.timestampsForKey, context.commandsForKey, context.commandsForRanges);
-                context.releaseResources(commandStore);
+                // TODO (required): currently, we are not very efficient about ensuring that we persist the absolute minimum amount of state. Improve that.
+                List<SavedCommand.SavedDiff> diffs = null;
+                for (AccordSafeCommand commandState : context.commands.values())
+                {
+                    SavedCommand.SavedDiff diff = commandState.diff();
+                    if (diff != null)
+                    {
+                        if (diffs == null)
+                            diffs = new ArrayList<>(context.commands.size());
+                        diffs.add(diff);
+                        if (CassandraRelevantProperties.DTEST_ACCORD_JOURNAL_SANITY_CHECK_ENABLED.getBoolean())
+                        {
+                            if (sanityCheck == null)
+                                sanityCheck = new ArrayList<>(context.commands.size());
+                            sanityCheck.add(commandState.current());
+                        }
+                    }
+                }
+
                 commandStore.completeOperation(safeStore);
-                commandStore.executionOrder().unregister(this);
+                context.releaseResources(commandStore);
+                if (diffs != null)
+                {
+                    state(COMPLETING);
+                    this.commandStore.appendCommands(diffs, sanityCheck, () -> finish(result, null));
+                    return false;
+                }
+
                 state(COMPLETING);
             case COMPLETING:
                 finish(result, null);
@@ -264,6 +285,8 @@ public abstract class AsyncOperation<R> extends AsyncChains.Head<R> implements R
             case FAILED:
                 break;
         }
+
+        return false;
     }
 
     @Override
@@ -277,7 +300,7 @@ public abstract class AsyncOperation<R> extends AsyncChains.Head<R> implements R
             commandStore.setCurrentOperation(this);
             try
             {
-                runInternal();
+                runInternal(false);
             }
             catch (Throwable t)
             {
@@ -296,12 +319,28 @@ public abstract class AsyncOperation<R> extends AsyncChains.Head<R> implements R
         }
     }
 
+    private boolean preRun()
+    {
+        commandStore.checkInStoreThread();
+        try
+        {
+            return runInternal(true);
+        }
+        catch (Throwable t)
+        {
+            logger.error("Operation {} failed", this, t);
+            fail(t);
+            return false;
+        }
+    }
+
     @Override
     public void start(BiConsumer<? super R, Throwable> callback)
     {
         Invariants.checkState(this.callback == null);
         this.callback = callback;
-        commandStore.executor().execute(this);
+        if (!commandStore.inStore() || preRun())
+            commandStore.executor().execute(this);
     }
 
     static class ForFunction<R> extends AsyncOperation<R>
@@ -326,6 +365,7 @@ public abstract class AsyncOperation<R> extends AsyncChains.Head<R> implements R
         return new ForFunction<>((AccordCommandStore) commandStore, loadCtx, function);
     }
 
+    // TODO (desired): these anonymous ops are somewhat tricky to debug. We may want to at least give them names.
     static class ForConsumer extends AsyncOperation<Void>
     {
         private final Consumer<? super SafeCommandStore> consumer;

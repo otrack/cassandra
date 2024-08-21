@@ -25,11 +25,18 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Random;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterators;
+
+import accord.primitives.Routable;
+import accord.local.CommandStores;
+import org.apache.cassandra.config.CassandraRelevantProperties;
+import org.apache.cassandra.distributed.shared.WithProperties;
+import org.apache.cassandra.service.accord.*;
 import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
@@ -38,7 +45,7 @@ import org.slf4j.LoggerFactory;
 
 import accord.api.Key;
 import accord.api.Result;
-import accord.local.CommandsForKey;
+import accord.local.cfk.CommandsForKey;
 import accord.local.CheckedCommands;
 import accord.local.Command;
 import accord.local.CommandStore;
@@ -47,10 +54,6 @@ import accord.local.RedundantBefore;
 import accord.local.SaveStatus;
 import accord.local.Status;
 import accord.local.Status.Durability;
-import accord.messages.Accept;
-import accord.messages.Apply;
-import accord.messages.Commit;
-import accord.messages.PreAccept;
 import accord.primitives.Ballot;
 import accord.primitives.Deps;
 import accord.primitives.FullRoute;
@@ -83,10 +86,6 @@ import org.apache.cassandra.schema.KeyspaceParams;
 import org.apache.cassandra.schema.SchemaConstants;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.service.StorageService;
-import org.apache.cassandra.service.accord.AccordCommandStore;
-import org.apache.cassandra.service.accord.AccordKeyspace;
-import org.apache.cassandra.service.accord.AccordTestUtils;
-import org.apache.cassandra.service.accord.IAccordService;
 import org.apache.cassandra.service.accord.api.PartitionKey;
 import org.apache.cassandra.service.accord.serializers.CommandsForKeySerializer;
 import org.apache.cassandra.utils.FBUtilities;
@@ -99,9 +98,7 @@ import static accord.local.PreLoadContext.contextFor;
 import static accord.utils.async.AsyncChains.getUninterruptibly;
 import static org.apache.cassandra.Util.spinAssertEquals;
 import static org.apache.cassandra.cql3.statements.schema.CreateTableStatement.parse;
-import static org.apache.cassandra.db.compaction.CompactionAccordIteratorsTest.DurableBeforeType.MAJORITY;
-import static org.apache.cassandra.db.compaction.CompactionAccordIteratorsTest.DurableBeforeType.NOT_DURABLE;
-import static org.apache.cassandra.db.compaction.CompactionAccordIteratorsTest.DurableBeforeType.UNIVERSAL;
+import static org.apache.cassandra.db.compaction.CompactionAccordIteratorsTest.DurableBeforeType.*;
 import static org.apache.cassandra.schema.SchemaConstants.ACCORD_KEYSPACE_NAME;
 import static org.apache.cassandra.service.accord.AccordKeyspace.*;
 import static org.junit.Assert.*;
@@ -113,7 +110,6 @@ import static org.mockito.Mockito.when;
 public class CompactionAccordIteratorsTest
 {
     private static final Logger logger = LoggerFactory.getLogger(CompactionAccordIteratorsTest.class);
-
     private static final long CLOCK_START = 44;
     private static final long HLC_START = 41;
     private static final int NODE = 1;
@@ -122,9 +118,10 @@ public class CompactionAccordIteratorsTest
     private static final TxnId LT_TXN_ID = AccordTestUtils.txnId(EPOCH, HLC_START, NODE);
     private static final TxnId TXN_ID = AccordTestUtils.txnId(EPOCH, LT_TXN_ID.hlc() + 1, NODE);
     private static final TxnId SECOND_TXN_ID = AccordTestUtils.txnId(EPOCH, TXN_ID.hlc() + 1, NODE, Kind.Read);
+    private static final TxnId RANGE_TXN_ID = AccordTestUtils.txnId(EPOCH, TXN_ID.hlc() + 1, NODE, Kind.Read, Routable.Domain.Range);
     private static final TxnId GT_TXN_ID = SECOND_TXN_ID;
     // For CommandsForKey where we test with two commands
-    private static final TxnId[] TXN_IDS = new TxnId[] {TXN_ID, SECOND_TXN_ID};
+    private static final TxnId[] TXN_IDS = new TxnId[]{ TXN_ID, SECOND_TXN_ID };
     private static final TxnId GT_SECOND_TXN_ID = AccordTestUtils.txnId(EPOCH, SECOND_TXN_ID.hlc() + 1, NODE);
 
     static ColumnFamilyStore commands;
@@ -146,7 +143,7 @@ public class CompactionAccordIteratorsTest
         SchemaLoader.prepareServer();
         // Schema doesn't matter since this is a metadata only test
         SchemaLoader.createKeyspace("ks", KeyspaceParams.simple(1),
-                                    parse("CREATE TABLE tbl (k int, c int, v int, primary key (k, c))", "ks"));
+                                    parse("CREATE TABLE tbl (k int, c int, v int, PRIMARY KEY (k, c)) WITH transactional_mode = 'full'", "ks"));
         StorageService.instance.initServer();
 
         commands = ColumnFamilyStore.getIfExists(SchemaConstants.ACCORD_KEYSPACE_NAME, AccordKeyspace.COMMANDS);
@@ -266,9 +263,9 @@ public class CompactionAccordIteratorsTest
             assertEquals(1, partitions.size());
             Partition partition = partitions.get(0);
             PartitionKey partitionKey = new PartitionKey(partition.metadata().id, partition.partitionKey());
-            CommandsForKey cfk = CommandsForKeysAccessor.getCommandsForKey(partitionKey, ((Row)partition.unfilteredIterator().next()));
+            CommandsForKey cfk = CommandsForKeysAccessor.getCommandsForKey(partitionKey, ((Row) partition.unfilteredIterator().next()));
             assertEquals(TXN_IDS.length, cfk.size());
-            for (int i = 0 ; i < TXN_IDS.length ; ++i)
+            for (int i = 0; i < TXN_IDS.length; ++i)
                 assertEquals(TXN_IDS[i], cfk.txnId(i));
         };
     }
@@ -350,7 +347,7 @@ public class CompactionAccordIteratorsTest
             Partition partition = partitions.get(0);
             assertEquals(1, Iterators.size(partition.unfilteredIterator()));
             ByteBuffer[] partitionKeyComponents = CommandRows.splitPartitionKey(partition.partitionKey());
-            Row row = (Row)partition.unfilteredIterator().next();
+            Row row = (Row) partition.unfilteredIterator().next();
             assertEquals(CommandsColumns.TRUNCATE_FIELDS.length, row.columnCount());
             for (ColumnMetadata cm : CommandsColumns.TRUNCATE_FIELDS)
                 assertNotNull(row.getColumnData(cm));
@@ -369,7 +366,7 @@ public class CompactionAccordIteratorsTest
             Partition partition = partitions.get(0);
             assertEquals(1, Iterators.size(partition.unfilteredIterator()));
             ByteBuffer[] partitionKeyComponents = CommandRows.splitPartitionKey(partition.partitionKey());
-            Row row = (Row)partition.unfilteredIterator().next();
+            Row row = (Row) partition.unfilteredIterator().next();
 
             // execute_atleast is null, so when we read from the scanner the column won't be present in the partition
             Assertions.assertThat(new ArrayList<>(row.columns())).isEqualTo(commands.metadata().regularColumns().stream().filter(c -> !c.name.toString().equals("execute_atleast")).collect(Collectors.toList()));
@@ -422,7 +419,9 @@ public class CompactionAccordIteratorsTest
         Int2ObjectHashMap<RedundantBefore> redundantBefores = new Int2ObjectHashMap<>();
         if (redundantBefore != null)
             redundantBefores.put(commandStore.id(), redundantBefore);
-        when(mockAccordService.getRedundantBeforesAndDurableBefore()).thenReturn(Pair.create(redundantBefores, durableBefore));
+        Int2ObjectHashMap<CommandStores.RangesForEpoch> rangesForEpochs = new Int2ObjectHashMap<>();
+        rangesForEpochs.put(commandStore.id(), commandStore.unsafeRangesForEpoch());
+        when(mockAccordService.getCompactionInfo()).thenReturn(new IAccordService.CompactionInfo(redundantBefores, rangesForEpochs, durableBefore));
         return mockAccordService;
     }
 
@@ -448,59 +447,59 @@ public class CompactionAccordIteratorsTest
 
     private void testWithCommandStore(TestWithCommandStore test, boolean additionalCommand) throws Throwable
     {
+        try (WithProperties wp = new WithProperties().set(CassandraRelevantProperties.DTEST_ACCORD_JOURNAL_SANITY_CHECK_ENABLED, "true"))
+        {
+            testWithCommandStoreInternal(test, additionalCommand);
+        }
+    }
+
+    private void testWithCommandStoreInternal(TestWithCommandStore test, boolean additionalCommand) throws Throwable
+    {
         Keyspace.open(ACCORD_KEYSPACE_NAME).getColumnFamilyStores().forEach(ColumnFamilyStore::truncateBlocking);
+        ((AccordService) AccordService.instance()).journal().truncateForTesting();
         clock.set(CLOCK_START);
         AccordCommandStore commandStore = AccordTestUtils.createAccordCommandStore(clock::incrementAndGet, "ks", "tbl");
-        TxnId[] txnIds = additionalCommand ? TXN_IDS : new TxnId[] {TXN_ID};
+        TxnId[] txnIds = additionalCommand ? TXN_IDS : new TxnId[]{ TXN_ID };
         Txn writeTxn = AccordTestUtils.createWriteTxn(42);
         Txn readTxn = AccordTestUtils.createTxn(42);
         Seekable key = writeTxn.keys().get(0);
         for (TxnId txnId : txnIds)
         {
             Txn txn = txnId.kind().isWrite() ? writeTxn : readTxn;
-            PartialDeps partialDeps = Deps.NONE.slice(AccordTestUtils.fullRange(txn));
+            PartialDeps partialDeps = Deps.NONE.intersecting(AccordTestUtils.fullRange(txn));
             PartialTxn partialTxn = txn.slice(commandStore.unsafeRangesForEpoch().currentRanges(), true);
             PartialRoute<?> partialRoute = route.slice(commandStore.unsafeRangesForEpoch().currentRanges());
             getUninterruptibly(commandStore.execute(contextFor(txnId, txn.keys(), COMMANDS), safe -> {
-                PreAccept preAccept =
-                    PreAccept.SerializerSupport.create(txnId, partialRoute, txnId.epoch(), txnId.epoch(), false, txnId.epoch(), partialTxn, route);
-                commandStore.appendToJournal(preAccept);
-                CheckedCommands.preaccept(safe, txnId, partialTxn, route, null);
+                CheckedCommands.preaccept(safe, txnId, partialTxn, route, null, appendDiffToKeyspace(commandStore));
             }).beginAsResult());
             flush(commandStore);
             getUninterruptibly(commandStore.execute(contextFor(txnId, txn.keys(), COMMANDS), safe -> {
-                Accept accept =
-                    Accept.SerializerSupport.create(txnId, partialRoute, txnId.epoch(), txnId.epoch(), false, Ballot.ZERO, txnId, partialTxn.keys(), partialDeps);
-                commandStore.appendToJournal(accept);
-                CheckedCommands.accept(safe, txnId, Ballot.ZERO, partialRoute, partialTxn.keys(), null, txnId, partialDeps);
+                CheckedCommands.accept(safe, txnId, Ballot.ZERO, partialRoute, partialTxn.keys(), null, txnId, partialDeps, appendDiffToKeyspace(commandStore));
             }).beginAsResult());
             flush(commandStore);
             getUninterruptibly(commandStore.execute(contextFor(txnId, txn.keys(), COMMANDS), safe -> {
-                Commit commit =
-                    Commit.SerializerSupport.create(txnId, partialRoute, txnId.epoch(), Commit.Kind.StableFastPath, Ballot.ZERO, txnId, partialTxn.keys(), partialTxn, partialDeps, route, null);
-                commandStore.appendToJournal(commit);
-                CheckedCommands.commit(safe, SaveStatus.Stable, Ballot.ZERO, txnId, route, null, partialTxn, txnId, partialDeps);
+                CheckedCommands.commit(safe, SaveStatus.Stable, Ballot.ZERO, txnId, route, null, partialTxn, txnId, partialDeps, appendDiffToKeyspace(commandStore));
             }).beginAsResult());
             flush(commandStore);
             getUninterruptibly(commandStore.execute(contextFor(txnId, txn.keys(), COMMANDS), safe -> {
                 Pair<Writes, Result> result = AccordTestUtils.processTxnResultDirect(safe, txnId, partialTxn, txnId);
-                Apply apply =
-                    Apply.SerializationSupport.create(txnId, partialRoute, txnId.epoch(), Apply.Kind.Minimal, partialTxn.keys(), txnId, partialDeps, partialTxn, null, result.left, result.right);
-                commandStore.appendToJournal(apply);
-                CheckedCommands.apply(safe, txnId, route, null, txnId, partialDeps, partialTxn, result.left, result.right);
+                CheckedCommands.apply(safe, txnId, route, null, txnId, partialDeps, partialTxn, result.left, result.right, appendDiffToKeyspace(commandStore));
             }).beginAsResult());
             getUninterruptibly(commandStore.execute(contextFor(txnId, txn.keys(), COMMANDS), safe -> {
-                safe.get(txnId, txnId, route).addListener(new Command.ProxyListener(txnId)); // add a junk listener just to test it in compaction
+                safe.get(txnId, txnId, route).addListener(new Command.ProxyListener(RANGE_TXN_ID)); // add a junk listener just to test it in compaction
             }).beginAsResult());
             flush(commandStore);
             // The apply chain is asychronous, so it is easiest to just spin until it is applied
             // in order to have the updated state in the system table
-            spinAssertEquals(true, 5, () ->
-                                      getUninterruptibly(commandStore.submit(contextFor(txnId, txn.keys(), COMMANDS), safe -> safe.get(txnId, route.homeKey()).current().hasBeen(Status.Applied)
-                                      ).beginAsResult()));
+            spinAssertEquals(true, 5, () -> {
+                return getUninterruptibly(commandStore.submit(contextFor(txnId, txn.keys(), COMMANDS), safe -> {
+                    Command command = safe.get(txnId, route.homeKey()).current();
+                    appendDiffToKeyspace(commandStore).accept(null, command);
+                    return command.hasBeen(Status.Applied);
+                }).beginAsResult());
+            });
             flush(commandStore);
         }
-
         UntypedResultSet commandsTable = QueryProcessor.executeInternal("SELECT * FROM " + ACCORD_KEYSPACE_NAME + "." + AccordKeyspace.COMMANDS + ";");
         logger.info(commandsTable.toStringUnsafe());
         assertEquals(txnIds.length, commandsTable.size());
@@ -510,11 +509,19 @@ public class CompactionAccordIteratorsTest
         UntypedResultSet commandsForKeyTable = QueryProcessor.executeInternal("SELECT * FROM " + ACCORD_KEYSPACE_NAME + "." + COMMANDS_FOR_KEY + ";");
         logger.info(commandsForKeyTable.toStringUnsafe());
         assertEquals(1, commandsForKeyTable.size());
-        CommandsForKey cfk = CommandsForKeySerializer.fromBytes((Key)key, commandsForKeyTable.iterator().next().getBytes("data"));
+        CommandsForKey cfk = CommandsForKeySerializer.fromBytes((Key) key, commandsForKeyTable.iterator().next().getBytes("data"));
         assertEquals(txnIds.length, cfk.size());
-        for (int i = 0 ; i < txnIds.length ; ++i)
+        for (int i = 0; i < txnIds.length; ++i)
             assertEquals(txnIds[i], cfk.txnId(i));
         test.test(commandStore);
+    }
+
+    // This little bit of magic is required because we do not expose range commands explicitly, but still need to compact them
+    private static BiConsumer<Command, Command> appendDiffToKeyspace(AccordCommandStore commandStore)
+    {
+        return (before, after) -> {
+            AccordKeyspace.getCommandMutation(commandStore.id(), before, after, commandStore.nextSystemTimestampMicros()).applyUnsafe();
+        };
     }
 
     private List<Partition> compactCFS(IAccordService mockAccordService, ColumnFamilyStore cfs)
@@ -555,7 +562,7 @@ public class CompactionAccordIteratorsTest
                 scanners.add(random.nextInt(scanners.size()), new Scanner(cfs.metadata(), outputPartitions.stream().map(Partition::unfilteredIterator).collect(Collectors.toList())));
         } while (!scanners.isEmpty());
 
-        verify(mockAccordService, times(singleCompaction || numScanners == 1 ? 1 : numScanners - 1)).getRedundantBeforesAndDurableBefore();
+        verify(mockAccordService, times(singleCompaction || numScanners == 1 ? 1 : numScanners - 1)).getCompactionInfo();
         return result;
     }
 }

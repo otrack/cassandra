@@ -38,7 +38,6 @@ import accord.local.NodeTimeService;
 import accord.local.PreLoadContext;
 import accord.local.SafeCommandStore;
 import accord.messages.BeginRecovery;
-import accord.messages.Message;
 import accord.messages.PreAccept;
 import accord.messages.TxnRequest;
 import accord.primitives.Ballot;
@@ -109,7 +108,7 @@ public class SimulatedAccordCommandStore implements AutoCloseable
         this.nodeId = AccordTopology.tcmIdToAccord(ClusterMetadata.currentNullable().myNodeId());
         this.timeService = new NodeTimeService()
         {
-            private final ToLongFunction<TimeUnit> unixWrapper = NodeTimeService.unixWrapper(TimeUnit.NANOSECONDS, this::now);
+            private final ToLongFunction<TimeUnit> elapsed = NodeTimeService.elapsedWrapperFromNonMonotonicSource(TimeUnit.NANOSECONDS, this::now);
 
             @Override
             public Node.Id id()
@@ -130,9 +129,9 @@ public class SimulatedAccordCommandStore implements AutoCloseable
             }
 
             @Override
-            public long unix(TimeUnit unit)
+            public long elapsed(TimeUnit unit)
             {
-                return unixWrapper.applyAsLong(unit);
+                return elapsed.applyAsLong(unit);
             }
 
             @Override
@@ -332,8 +331,6 @@ public class SimulatedAccordCommandStore implements AutoCloseable
 
     public <T> AsyncResult<T> processAsync(PreLoadContext loadCtx, Function<? super SafeCommandStore, T> function)
     {
-        if (loadCtx instanceof Message)
-            journal.appendMessageBlocking((Message) loadCtx);
         return store.submit(loadCtx, function).beginAsResult();
     }
 

@@ -119,10 +119,27 @@ public class AccordAgent implements Agent
         return getReadRpcTimeout(MICROSECONDS);
     }
 
+    // TODO (expected): we probably want additional configuration here so we can prune on shorter time horizons when we have a lot of transactions on a single key
     @Override
-    public Txn emptyTxn(Kind kind, Seekables<?, ?> seekables)
+    public long cfkHlcPruneDelta()
     {
-        return new Txn.InMemory(kind, seekables, TxnRead.EMPTY, TxnQuery.EMPTY, null);
+        return SECONDS.toMicros(10L);
+    }
+
+    @Override
+    public int cfkPruneInterval()
+    {
+        return 32;
+    }
+
+    /**
+     * Create an empty transaction that Accord can use for its internal transactions. This is not suitable
+     * for tests since it skips validation done by regular transactions.
+     */
+    @Override
+    public Txn emptySystemTxn(Kind kind, Seekables<?, ?> seekables)
+    {
+        return new Txn.InMemory(kind, seekables, TxnRead.EMPTY, TxnQuery.UNSAFE_EMPTY, null);
     }
 
     @Override

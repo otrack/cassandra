@@ -27,13 +27,17 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 import java.util.function.LongSupplier;
+import java.util.function.ToLongFunction;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
-
 import javax.annotation.Nullable;
 
-import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
+
+import accord.utils.SortedArrays.SortedArrayList;
+import org.apache.cassandra.ServerTestUtils;
+import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.io.util.File;
 import org.junit.Assert;
 
 import accord.api.Data;
@@ -93,8 +97,10 @@ import org.apache.cassandra.service.ClientState;
 import org.apache.cassandra.service.accord.api.AccordAgent;
 import org.apache.cassandra.service.accord.api.PartitionKey;
 import org.apache.cassandra.service.accord.txn.TxnData;
+import org.apache.cassandra.service.accord.txn.TxnQuery;
 import org.apache.cassandra.service.accord.txn.TxnRead;
 import org.apache.cassandra.utils.Pair;
+import org.apache.cassandra.utils.concurrent.Condition;
 import org.apache.cassandra.utils.concurrent.UncheckedInterruptedException;
 
 import static accord.primitives.Routable.Domain.Key;
@@ -153,7 +159,7 @@ public class AccordTestUtils
         {
             Seekable key = txn.keys().get(0);
             RoutingKey routingKey = key.asKey().toUnseekable();
-            return new FullKeyRoute(routingKey, true, new RoutingKey[]{ routingKey });
+            return new FullKeyRoute(routingKey, new RoutingKey[]{ routingKey });
         }
     }
 
@@ -325,7 +331,7 @@ public class AccordTestUtils
 
     public static Txn createTxn(Txn.Kind kind, Seekables<?, ?> seekables)
     {
-        return AGENT.emptyTxn(kind, seekables);
+        return new Txn.InMemory(kind, seekables, TxnRead.EMPTY, TxnQuery.NONE, null);
     }
 
     public static Ranges fullRange(Txn txn)
@@ -343,7 +349,7 @@ public class AccordTestUtils
     {
         Txn txn = createTxn(key, key);
         Ranges ranges = fullRange(txn);
-        return new PartialTxn.InMemory(ranges, txn.kind(), txn.keys(), txn.read(), txn.query(), txn.update());
+        return new PartialTxn.InMemory(txn.kind(), txn.keys(), txn.read(), txn.query(), txn.update());
     }
 
     private static class SingleEpochRanges extends CommandStore.EpochUpdateHolder
@@ -366,15 +372,16 @@ public class AccordTestUtils
         TableMetadata metadata = Schema.instance.getTableMetadata(keyspace, table);
         TokenRange range = TokenRange.fullRange(metadata.id);
         Node.Id node = new Id(1);
-        Topology topology = new Topology(1, new Shard(range, Lists.newArrayList(node), Sets.newHashSet(node), Collections.emptySet()));
         NodeTimeService time = new NodeTimeService()
         {
+            private ToLongFunction<TimeUnit> elapsed = NodeTimeService.elapsedWrapperFromNonMonotonicSource(TimeUnit.MICROSECONDS, this::now);
+
             @Override public Id id() { return node;}
             @Override public long epoch() {return 1; }
             @Override public long now() {return now.getAsLong(); }
             @Override public Timestamp uniqueNow(Timestamp atLeast) { return Timestamp.fromValues(1, now.getAsLong(), node); }
             @Override
-            public long unix(TimeUnit timeUnit) { return NodeTimeService.unixWrapper(TimeUnit.MICROSECONDS, this::now).applyAsLong(timeUnit); }
+            public long elapsed(TimeUnit timeUnit) { return elapsed.applyAsLong(timeUnit); }
         };
 
         SingleEpochRanges holder = new SingleEpochRanges(Ranges.of(range));
@@ -392,14 +399,19 @@ public class AccordTestUtils
     {
         NodeTimeService time = new NodeTimeService()
         {
+            private ToLongFunction<TimeUnit> elapsed = NodeTimeService.elapsedWrapperFromNonMonotonicSource(TimeUnit.MICROSECONDS, this::now);
+
             @Override public Id id() { return node;}
             @Override public long epoch() {return 1; }
             @Override public long now() {return now.getAsLong(); }
             @Override public Timestamp uniqueNow(Timestamp atLeast) { return Timestamp.fromValues(1, now.getAsLong(), node); }
             @Override
-            public long unix(TimeUnit timeUnit) { return NodeTimeService.unixWrapper(TimeUnit.MICROSECONDS, this::now).applyAsLong(timeUnit); }
+            public long elapsed(TimeUnit timeUnit) { return elapsed.applyAsLong(timeUnit); }
         };
 
+
+        if (new File(DatabaseDescriptor.getAccordJournalDirectory()).exists())
+            ServerTestUtils.cleanupDirectory(DatabaseDescriptor.getAccordJournalDirectory());
         AccordJournal journal = new AccordJournal(null, new AccordSpec.JournalSpec());
         journal.start(null);
 
@@ -430,7 +442,7 @@ public class AccordTestUtils
         TableMetadata metadata = Schema.instance.getTableMetadata(keyspace, table);
         TokenRange range = TokenRange.fullRange(metadata.id);
         Node.Id node = new Id(1);
-        Topology topology = new Topology(1, new Shard(range, Lists.newArrayList(node), Sets.newHashSet(node), Collections.emptySet()));
+        Topology topology = new Topology(1, new Shard(range, new SortedArrayList<>(new Id[] { node }), Sets.newHashSet(node), Collections.emptySet()));
         AccordCommandStore store = createAccordCommandStore(node, now, topology, loadExecutor, saveExecutor);
         store.execute(PreLoadContext.empty(), safeStore -> ((AccordCommandStore)safeStore.commandStore()).setCapacity(1 << 20));
         return store;
@@ -473,9 +485,9 @@ public class AccordTestUtils
         return new Node.Id(id);
     }
 
-    public static List<Node.Id> idList(int... ids)
+    public static SortedArrayList<Id> idList(int... ids)
     {
-        return Arrays.stream(ids).mapToObj(AccordTestUtils::id).collect(Collectors.toList());
+        return new SortedArrayList<>(Arrays.stream(ids).mapToObj(AccordTestUtils::id).toArray(Id[]::new));
     }
 
     public static Set<Id> idSet(int... ids)
@@ -498,4 +510,19 @@ public class AccordTestUtils
         return range(token(left), token(right));
     }
 
+    public static void appendCommandsBlocking(AccordCommandStore commandStore, Command after)
+    {
+        appendCommandsBlocking(commandStore, null, after);
+    }
+
+    public static void appendCommandsBlocking(AccordCommandStore commandStore, Command before, Command after)
+    {
+        SavedCommand.SavedDiff diff = SavedCommand.diff(before, after);
+        if (diff != null)
+        {
+            Condition condition = Condition.newOneTimeCondition();
+            commandStore.appendCommands(Collections.singletonList(diff), null, condition::signal);
+            condition.awaitUninterruptibly(30, TimeUnit.SECONDS);
+        }
+    }
 }

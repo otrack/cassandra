@@ -32,10 +32,10 @@ import accord.api.DataStore;
 import accord.api.Read;
 import accord.local.SafeCommandStore;
 import accord.primitives.Keys;
+import accord.primitives.Participants;
 import accord.primitives.Ranges;
 import accord.primitives.Seekable;
 import accord.primitives.Timestamp;
-import accord.utils.SortedArrays;
 import org.apache.cassandra.db.SinglePartitionReadCommand;
 import accord.utils.async.AsyncChain;
 import accord.utils.async.AsyncChains;
@@ -49,7 +49,6 @@ import org.apache.cassandra.service.accord.txn.TxnDataName.Kind;
 import org.apache.cassandra.utils.ObjectSizes;
 import org.apache.cassandra.utils.Simulate;
 
-import static accord.utils.SortedArrays.Search.CEIL;
 import static com.google.common.base.Preconditions.checkArgument;
 import static org.apache.cassandra.service.accord.AccordSerializers.consistencyLevelSerializer;
 import static org.apache.cassandra.service.accord.IAccordService.SUPPORTED_READ_CONSISTENCY_LEVELS;
@@ -160,14 +159,25 @@ public class TxnRead extends AbstractKeySorted<TxnNamedRead> implements Read
     @Override
     public Read slice(Ranges ranges)
     {
-        Keys keys = itemKeys.slice(ranges);
+        return intersecting(itemKeys.slice(ranges));
+    }
+
+    @Override
+    public Read intersecting(Participants<?> participants)
+    {
+        return intersecting(itemKeys.intersecting(participants));
+    }
+
+    private Read intersecting(Keys select)
+    {
+        Keys keys = itemKeys.intersecting(select);
         List<TxnNamedRead> reads = new ArrayList<>(keys.size());
 
         for (TxnNamedRead read : items)
             if (keys.contains(read.key()))
                 reads.add(read);
 
-        return createTxnRead(reads, txnKeys.slice(ranges), cassandraConsistencyLevel);
+        return createTxnRead(reads, txnKeys.intersecting(select), cassandraConsistencyLevel);
     }
 
     @Override
@@ -181,22 +191,6 @@ public class TxnRead extends AbstractKeySorted<TxnNamedRead> implements Read
                 reads.add(namedRead);
 
         return createTxnRead(reads, txnKeys.with((Keys)read.keys()), cassandraConsistencyLevel);
-    }
-
-    @Override
-    public boolean isEqualOrFuller(Read other)
-    {
-        TxnRead that = (TxnRead) other;
-
-        int j = 0;
-        for (int i = 0; i < that.items.length; ++i)
-        {
-            j = SortedArrays.exponentialSearch(this.items, j, this.items.length, that.items[i], this::compare, CEIL);
-            if (j < 0 || !that.items[i].equals(this.items[j]))
-                return false;
-        }
-
-        return this.txnKeys.containsAll(that.txnKeys);
     }
 
     @Override

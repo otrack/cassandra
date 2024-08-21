@@ -28,15 +28,11 @@ import accord.api.DataStore;
 import accord.api.Key;
 import accord.api.ProgressLog;
 import accord.impl.AbstractSafeCommandStore;
-import accord.local.CommandsForKey;
+import accord.local.cfk.CommandsForKey;
 import accord.impl.CommandsSummary;
 import accord.local.CommandStores.RangesForEpoch;
 import accord.local.NodeTimeService;
 import accord.local.PreLoadContext;
-import accord.messages.BeginRecovery;
-
-import accord.messages.PreAccept;
-import accord.messages.TxnRequest;
 import accord.primitives.AbstractKeys;
 import accord.primitives.AbstractRanges;
 import accord.primitives.Deps;
@@ -49,7 +45,6 @@ import accord.primitives.TxnId;
 
 public class AccordSafeCommandStore extends AbstractSafeCommandStore<AccordSafeCommand, AccordSafeTimestampsForKey, AccordSafeCommandsForKey>
 {
-    private final long preAcceptTimeout;
     private final Map<TxnId, AccordSafeCommand> commands;
     private final NavigableMap<Key, AccordSafeCommandsForKey> commandsForKeys;
     private final NavigableMap<Key, AccordSafeTimestampsForKey> timestampsForKeys;
@@ -58,7 +53,6 @@ public class AccordSafeCommandStore extends AbstractSafeCommandStore<AccordSafeC
     private final RangesForEpoch ranges;
 
     private AccordSafeCommandStore(PreLoadContext context,
-                                   long preAcceptTimeout,
                                    Map<TxnId, AccordSafeCommand> commands,
                                    NavigableMap<Key, AccordSafeTimestampsForKey> timestampsForKey,
                                    NavigableMap<Key, AccordSafeCommandsForKey> commandsForKey,
@@ -66,7 +60,6 @@ public class AccordSafeCommandStore extends AbstractSafeCommandStore<AccordSafeC
                                    AccordCommandStore commandStore)
     {
         super(context);
-        this.preAcceptTimeout = preAcceptTimeout;
         this.commands = commands;
         this.timestampsForKeys = timestampsForKey;
         this.commandsForKeys = commandsForKey;
@@ -82,17 +75,7 @@ public class AccordSafeCommandStore extends AbstractSafeCommandStore<AccordSafeC
                                                 @Nullable AccordSafeCommandsForRanges commandsForRanges,
                                                 AccordCommandStore commandStore)
     {
-        long preAcceptTimeoutMicros = -1;
-        if ((preLoadContext instanceof PreAccept || preLoadContext instanceof BeginRecovery))
-        {
-            TxnRequest<?> preAccept = (TxnRequest<?>) preLoadContext;
-            AccordJournal.RequestContext context = (AccordJournal.RequestContext) preAccept.replyContext();
-            // TODO (required): SimulatedDepsTest and some other tests aren't calling preProcess, hence do not set context
-            if (context != null)
-                preAcceptTimeoutMicros = context.preAcceptTimeout();
-        }
-
-        return new AccordSafeCommandStore(preLoadContext, preAcceptTimeoutMicros, commands, timestampsForKey, commandsForKey, commandsForRanges, commandStore);
+        return new AccordSafeCommandStore(preLoadContext, commands, timestampsForKey, commandsForKey, commandsForRanges, commandStore);
     }
 
     @Override
@@ -184,15 +167,6 @@ public class AccordSafeCommandStore extends AbstractSafeCommandStore<AccordSafeC
     {
         // TODO: safe command store should not have arbitrary time
         return commandStore.time();
-    }
-
-    @Override
-    public long preAcceptTimeout()
-    {
-        if (preAcceptTimeout == -1)
-            return super.preAcceptTimeout();
-
-        return preAcceptTimeout;
     }
 
     @Override
@@ -322,27 +296,6 @@ public class AccordSafeCommandStore extends AbstractSafeCommandStore<AccordSafeC
         return mapReduce(keysOrRanges, slice, (summary, in) -> {
             return summary.mapReduceFull(testTxnId, testKind, testStartedAt, testDep, testStatus, map, p1, in);
         }, accumulate);
-    }
-
-    @Override
-    protected void invalidateSafeState()
-    {
-        commands.values().forEach(AccordSafeCommand::invalidate);
-        timestampsForKeys.values().forEach(AccordSafeTimestampsForKey::invalidate);
-        commandsForKeys.values().forEach(AccordSafeCommandsForKey::invalidate);
-    }
-
-    public void postExecute(Map<TxnId, AccordSafeCommand> commands,
-                            Map<Key, AccordSafeTimestampsForKey> timestampsForKey,
-                            Map<Key, AccordSafeCommandsForKey> commandsForKeys,
-                            @Nullable AccordSafeCommandsForRanges commandsForRanges)
-    {
-        postExecute();
-        commands.values().forEach(AccordSafeState::postExecute);
-        timestampsForKey.values().forEach(AccordSafeState::postExecute);
-        commandsForKeys.values().forEach(AccordSafeState::postExecute);
-        if (commandsForRanges != null)
-            commandsForRanges.postExecute();
     }
 
     @Override

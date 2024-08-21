@@ -31,13 +31,12 @@ import org.slf4j.LoggerFactory;
 
 import accord.api.Key;
 import accord.api.Result;
-import accord.local.CommandsForKey;
-import accord.impl.TimestampsForKeys;
 import accord.impl.TimestampsForKey;
+import accord.impl.TimestampsForKeys;
 import accord.local.Command;
+import accord.local.cfk.CommandsForKey;
 import accord.local.CommonAttributes;
 import accord.local.SaveStatus;
-import accord.messages.Apply;
 import accord.primitives.Ballot;
 import accord.primitives.PartialDeps;
 import accord.primitives.PartialTxn;
@@ -104,7 +103,7 @@ public class AccordCommandStoreTest
     {
         AtomicLong clock = new AtomicLong(0);
         PartialTxn depTxn = createPartialTxn(0);
-        Key key = (Key)depTxn.keys().get(0);
+        Key key = (Key) depTxn.keys().get(0);
         Range range = key.toUnseekable().asRange();
         AccordCommandStore commandStore = createAccordCommandStore(clock::incrementAndGet, "ks", "tbl");
 
@@ -115,7 +114,7 @@ public class AccordCommandStoreTest
         TxnId txnId = txnId(1, clock.incrementAndGet(), 1, Txn.Kind.Write, Routable.Domain.Range);
 
         PartialDeps dependencies;
-        try (PartialDeps.Builder builder = PartialDeps.builder(depTxn.covering()))
+        try (PartialDeps.Builder builder = PartialDeps.builder(Ranges.of(range)))
         {
             builder.add(range, oldTxnId1);
             builder.add(range, oldTxnId2);
@@ -135,35 +134,23 @@ public class AccordCommandStoreTest
         attrs.partialDeps(dependencies);
         SimpleBitSet waitingOnApply = new SimpleBitSet(3);
         waitingOnApply.set(1);
-        Command.WaitingOn waitingOn = new Command.WaitingOn(dependencies.keyDeps.keys(), dependencies.rangeDeps.txnIds(), new ImmutableBitSet(waitingOnApply), new ImmutableBitSet(2));
+        Command.WaitingOn waitingOn = new Command.WaitingOn(dependencies.keyDeps.keys(), dependencies.rangeDeps, dependencies.directKeyDeps, new ImmutableBitSet(waitingOnApply), new ImmutableBitSet(2));
         attrs.addListener(new Command.ProxyListener(oldTxnId1));
         Pair<Writes, Result> result = AccordTestUtils.processTxnResult(commandStore, txnId, txn, executeAt);
 
-        Command command = Command.SerializerSupport.executed(attrs, SaveStatus.Applied, executeAt, promised, accepted,
-                                                             waitingOn, result.left, CommandSerializers.APPLIED);
+        Command expected = Command.SerializerSupport.executed(attrs, SaveStatus.Applied, executeAt, promised, accepted,
+                                                              waitingOn, result.left, CommandSerializers.APPLIED);
         AccordSafeCommand safeCommand = new AccordSafeCommand(loaded(txnId, null));
-        safeCommand.set(command);
+        safeCommand.set(expected);
 
-        Apply apply =
-            Apply.SerializationSupport.create(txnId,
-                                              route.slice(Ranges.of(TokenRange.fullRange(tableId))),
-                                              1L,
-                                              Apply.Kind.Maximal,
-                                              depTxn.keys(),
-                                              executeAt,
-                                              dependencies,
-                                              txn,
-                                              null,
-                                              result.left,
-                                              CommandSerializers.APPLIED);
-        commandStore.appendToJournal(apply);
+        AccordTestUtils.appendCommandsBlocking(commandStore, null, expected);
         AccordKeyspace.getCommandMutation(commandStore, safeCommand, commandStore.nextSystemTimestampMicros()).apply();
 
-        logger.info("E: {}", command);
-        Command actual = AccordKeyspace.loadCommand(commandStore, txnId);
+        logger.info("E: {}", expected);
+        Command actual = commandStore.loadCommand(txnId);
         logger.info("A: {}", actual);
 
-        Assert.assertEquals(command, actual);
+        Assert.assertEquals(expected, actual);
     }
 
     @Test
@@ -196,8 +183,8 @@ public class AccordCommandStoreTest
         AccordSafeCommandsForKey cfk = new AccordSafeCommandsForKey(loaded(key, null));
         cfk.initialize();
 
-        cfk.set(cfk.current().update(null, command1));
-        cfk.set(cfk.current().update(null, command2));
+        cfk.set(cfk.current().update(command1).cfk());
+        cfk.set(cfk.current().update(command2).cfk());
 
         AccordKeyspace.getTimestampsForKeyMutation(commandStore, tfk, commandStore.nextSystemTimestampMicros()).apply();
         logger.info("E: {}", tfk);
@@ -227,8 +214,8 @@ public class AccordCommandStoreTest
         AccordSafeCommandsForKey cfk = new AccordSafeCommandsForKey(loaded(key, null));
         cfk.initialize();
 
-        cfk.set(cfk.current().update(null, command1));
-        cfk.set(cfk.current().update(null, command2));
+        cfk.set(cfk.current().update(command1).cfk());
+        cfk.set(cfk.current().update(command2).cfk());
 
         AccordKeyspace.getCommandsForKeyMutation(commandStore.id(), cfk.current(), commandStore.nextSystemTimestampMicros()).apply();
         logger.info("E: {}", cfk);

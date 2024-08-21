@@ -41,6 +41,7 @@ import org.apache.cassandra.distributed.api.ConsistencyLevel;
 import org.apache.cassandra.distributed.api.ICoordinator;
 import org.apache.cassandra.distributed.api.IMessage;
 import org.apache.cassandra.distributed.api.IMessageFilters;
+import org.apache.cassandra.distributed.shared.DistributedTestBase;
 import org.apache.cassandra.net.Verb;
 import org.apache.cassandra.utils.EstimatedHistogram;
 
@@ -63,7 +64,7 @@ public class AccordLoadTest extends AccordTestBase
     @Test
     public void testLoad() throws Exception
     {
-        test("CREATE TABLE " + qualifiedTableName + " (k int, v int, PRIMARY KEY(k)) WITH transactional_mode = 'full'",
+        test("CREATE TABLE " + qualifiedAccordTableName + " (k int, v int, PRIMARY KEY(k)) WITH transactional_mode = 'full'",
              cluster -> {
 
                 final ConcurrentHashMap<Verb, AtomicInteger> verbs = new ConcurrentHashMap<>();
@@ -85,7 +86,7 @@ public class AccordLoadTest extends AccordTestBase
                  final float readChance = 0.33f;
                  long nextRepairAt = repairInterval;
                  for (int i = 1; i <= keyCount; i++)
-                     coordinator.execute("INSERT INTO " + qualifiedTableName + " (k, v) VALUES (0, 0) USING TIMESTAMP 0;", ConsistencyLevel.ALL, i);
+                     coordinator.execute("INSERT INTO " + qualifiedAccordTableName + " (k, v) VALUES (0, 0) USING TIMESTAMP 0;", ConsistencyLevel.ALL, i);
 
                  Random random = new Random();
 //                 CopyOnWriteArrayList<Throwable> exceptions = new CopyOnWriteArrayList<>();
@@ -108,7 +109,7 @@ public class AccordLoadTest extends AccordTestBase
                                  inFlight.release();
                                  if (fail == null) histogram.add(NANOSECONDS.toMicros(System.nanoTime() - commandStart));
                                  //                             else exceptions.add(fail);
-                             }, "SELECT * FROM " + qualifiedTableName + " WHERE k = ?;", ConsistencyLevel.SERIAL, random.nextInt(keyCount));
+                             }, "SELECT * FROM " + qualifiedAccordTableName + " WHERE k = ?;", ConsistencyLevel.SERIAL, random.nextInt(keyCount));
                          }
                          else
                          {
@@ -116,7 +117,7 @@ public class AccordLoadTest extends AccordTestBase
                                  inFlight.release();
                                  if (fail == null) histogram.add(NANOSECONDS.toMicros(System.nanoTime() - commandStart));
     //                             else exceptions.add(fail);
-                             }, "UPDATE " + qualifiedTableName + " SET v += 1 WHERE k = ? IF EXISTS;", ConsistencyLevel.SERIAL, ConsistencyLevel.QUORUM, random.nextInt(keyCount));
+                             }, "UPDATE " + qualifiedAccordTableName + " SET v += 1 WHERE k = ? IF EXISTS;", ConsistencyLevel.SERIAL, ConsistencyLevel.QUORUM, random.nextInt(keyCount));
                          }
                      }
 
@@ -124,7 +125,7 @@ public class AccordLoadTest extends AccordTestBase
                      {
                          nextRepairAt += repairInterval;
                          System.out.println("repairing...");
-                         cluster.coordinator(1).instance().nodetool("repair", qualifiedTableName);
+                         cluster.coordinator(1).instance().nodetool("repair", qualifiedAccordTableName);
                      }
 
                      final Date date = new Date();
@@ -171,5 +172,14 @@ public class AccordLoadTest extends AccordTestBase
     protected Logger logger()
     {
         return logger;
+    }
+
+    public static void main(String[] args) throws Throwable
+    {
+        DistributedTestBase.beforeClass();
+        AccordLoadTest.setUp();
+        AccordLoadTest test = new AccordLoadTest();
+        test.setup();
+        test.testLoad();
     }
 }
