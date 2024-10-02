@@ -71,6 +71,7 @@ import org.apache.cassandra.db.ConsistencyLevel;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.IMutation;
 import org.apache.cassandra.db.Keyspace;
+import org.apache.cassandra.db.ReadCommand.PotentialTxnConflicts;
 import org.apache.cassandra.db.ReadExecutionController;
 import org.apache.cassandra.db.RegularAndStaticColumns;
 import org.apache.cassandra.db.SinglePartitionReadCommand;
@@ -834,7 +835,7 @@ public abstract class ModificationStatement implements CQLStatement.SingleKeyspa
         SingleTableUpdatesCollector collector = new SingleTableUpdatesCollector(metadata, updatedColumns, perPartitionKeyCounts);
         addUpdates(collector, keys, state, options, local, timestamp, nowInSeconds, requestTime, constructingAccordBaseUpdate);
         // local means this is test or internal things that are bypassing distributed system modification/checks
-        return collector.toMutations(state, local);
+        return collector.toMutations(state, local ? PotentialTxnConflicts.ALLOW : PotentialTxnConflicts.DISALLOW);
     }
 
     public PartitionUpdate getTxnUpdate(ClientState state, QueryOptions options)
