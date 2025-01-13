@@ -18,7 +18,10 @@
 
 package org.apache.cassandra.cql3.ast;
 
+import java.nio.ByteBuffer;
+
 import org.apache.cassandra.db.marshal.AbstractType;
+import org.apache.cassandra.db.marshal.Int32Type;
 
 public class Literal implements Value
 {
@@ -29,6 +32,11 @@ public class Literal implements Value
     {
         this.value = value;
         this.type = type;
+    }
+
+    public static Literal of(int value)
+    {
+        return new Literal(value, Int32Type.instance);
     }
 
     @Override
@@ -44,14 +52,20 @@ public class Literal implements Value
     }
 
     @Override
+    public ByteBuffer valueEncoded()
+    {
+        return value instanceof ByteBuffer ? (ByteBuffer) value : ((AbstractType) type).decompose(value);
+    }
+
+    @Override
     public Literal with(Object value, AbstractType<?> type)
     {
         return new Literal(value, type);
     }
 
     @Override
-    public void toCQL(StringBuilder sb, int indent)
+    public void toCQL(StringBuilder sb, CQLFormatter formatter)
     {
-        sb.append(type.asCQL3Type().toCQLLiteral(((AbstractType<Object>) type.unwrap()).decompose(value)));
+        sb.append(type.asCQL3Type().toCQLLiteral(valueEncoded()));
     }
 }

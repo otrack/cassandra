@@ -21,6 +21,7 @@ package org.apache.cassandra.cql3.ast;
 import java.nio.ByteBuffer;
 
 import org.apache.cassandra.db.marshal.AbstractType;
+import org.apache.cassandra.db.marshal.Int32Type;
 
 public class Bind implements Value
 {
@@ -31,6 +32,11 @@ public class Bind implements Value
     {
         this.value = value;
         this.type = type;
+    }
+
+    public static Bind of(int value)
+    {
+        return new Bind(value, Int32Type.instance);
     }
 
     @Override
@@ -45,9 +51,10 @@ public class Bind implements Value
         return type;
     }
 
-    public ByteBuffer encode()
+    @Override
+    public ByteBuffer valueEncoded()
     {
-        return ((AbstractType) type).decompose(value);
+        return value instanceof ByteBuffer ? (ByteBuffer) value : ((AbstractType) type).decompose(value);
     }
 
     @Override
@@ -57,7 +64,7 @@ public class Bind implements Value
     }
 
     @Override
-    public void toCQL(StringBuilder sb, int indent)
+    public void toCQL(StringBuilder sb, CQLFormatter formatter)
     {
         sb.append('?');
     }

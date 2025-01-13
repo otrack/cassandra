@@ -43,7 +43,7 @@ public interface Statement extends Element
     {
         return streamRecursive()
                .filter(e -> e instanceof Bind)
-               .map(e -> ((Bind) e).encode())
+               .map(e -> ((Bind) e).valueEncoded())
                .toArray(ByteBuffer[]::new);
     }
 
@@ -54,6 +54,8 @@ public interface Statement extends Element
                                                             .mapToObj(i -> i + " -> " + binds[i].getClass().getCanonicalName() + "(" + normalize(binds[i]) + ")")
                                                             .collect(Collectors.joining("\n"));
     }
+
+    Statement visit(Visitor v);
 
     static boolean hasByteBuffer(Object value)
     {
