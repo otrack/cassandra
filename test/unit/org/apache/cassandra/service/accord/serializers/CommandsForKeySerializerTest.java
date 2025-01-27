@@ -92,7 +92,6 @@ import static accord.primitives.Known.KnownExecuteAt.ExecuteAtErased;
 import static accord.primitives.Known.KnownExecuteAt.ExecuteAtUnknown;
 import static accord.primitives.Status.Durability.Majority;
 import static accord.primitives.Status.Durability.NotDurable;
-import static accord.primitives.Status.Durability.max;
 import static accord.utils.Property.qt;
 import static accord.utils.SortedArrays.Search.FAST;
 import static org.apache.cassandra.cql3.statements.schema.CreateTableStatement.parse;
