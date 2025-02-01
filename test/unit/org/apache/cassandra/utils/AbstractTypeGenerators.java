@@ -280,7 +280,7 @@ public final class AbstractTypeGenerators
         private Function<Integer, Gen<AbstractType<?>>> defaultSetKeyFunc;
         private Predicate<AbstractType<?>> typeFilter = null;
         private Gen<String> udtName = null;
-        private Gen<Boolean> multiCellGen = BOOLEAN_GEN;;
+        private Gen<Boolean> multiCellGen = BOOLEAN_GEN;
 
         public TypeGenBuilder()
         {
@@ -1338,7 +1338,7 @@ public final class AbstractTypeGenerators
                 TypeSupport<Object> support = eSupport.get(i);
                 elements.add(support.type.decompose(support.valueGen.generate(rnd)));
             }
-            return type.pack(elements, ByteBufferAccessor.instance);
+            return type.pack(elements);
         }
     }
 

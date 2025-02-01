@@ -63,7 +63,8 @@ public final class ReplicationParams
         this.options = ImmutableMap.copyOf(options);
     }
 
-    public static ReplicationParams copy(AbstractReplicationStrategy strategy)
+    @VisibleForTesting
+    public static ReplicationParams fromStrategy(AbstractReplicationStrategy strategy)
     {
         return new ReplicationParams(strategy.getClass(), strategy.configOptions);
     }
