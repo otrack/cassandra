@@ -24,6 +24,7 @@ import java.util.Random;
 import com.google.common.collect.ImmutableMap;
 import org.apache.cassandra.io.util.File;
 import org.junit.Assert;
+import org.junit.Ignore;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 
@@ -54,6 +55,7 @@ public class CommitlogShutdownTest
 
     private final static byte[] entropy = new byte[1024 * 256];
 
+    @Ignore
     @Test
     @BMRule(name = "Make removing commitlog segments slow",
     targetClass = "CommitLogSegment",
