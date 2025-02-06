@@ -222,6 +222,7 @@ public class SingleNodeTableWalkTest extends StatefulASTBase
             preCheck(cluster, statefulBuilder);
             statefulBuilder.check(commands(() -> rs -> createState(rs, cluster))
                                   .add(StatefulASTBase::insert)
+                                  .add(StatefulASTBase::fullTableScan)
                                   .addIf(State::hasPartitions, this::selectExisting)
                                   .addAllIf(State::supportTokens, b -> b.add(this::selectToken)
                                                                         .add(this::selectTokenRange))

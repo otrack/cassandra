@@ -199,7 +199,14 @@ public class StatefulASTBase extends TestBaseImpl
 
     protected static <S extends CommonState> Property.Command<S, Void, ?> insert(RandomSource rs, S state)
     {
-        return state.command(rs, state.mutationGen().next(rs));
+        int timestamp = ++state.operations;
+        return state.command(rs, state.mutationGen().next(rs).withTimestamp(timestamp));
+    }
+
+    protected static <S extends BaseState> Property.Command<S, Void, ?> fullTableScan(RandomSource rs, S state)
+    {
+        Select select = Select.builder(state.metadata).build();
+        return state.command(rs, select, "full table scan");
     }
 
     protected static abstract class BaseState implements AutoCloseable
@@ -223,6 +230,7 @@ public class StatefulASTBase extends TestBaseImpl
         protected int numMutations, mutationsSinceLastFlush;
         protected int numFlushes, flushesSinceLastCompaction;
         protected int numCompact;
+        protected int operations;
 
         protected BaseState(RandomSource rs, Cluster cluster, TableMetadata metadata)
         {
@@ -277,7 +285,9 @@ public class StatefulASTBase extends TestBaseImpl
         {
             var inst = selectInstance(rs);
             int fetchSize = fetchSizeGen.nextInt(rs);
-            String postfix = "on " + inst + ", fetch size " + fetchSize;
+            String postfix = "on " + inst;
+            if (fetchSize != Integer.MAX_VALUE)
+                postfix += ", fetch size " + fetchSize;
             if (annotate == null) annotate = postfix;
             else                  annotate += ", " + postfix;
             return new Property.SimpleCommand<>(humanReadable(select, annotate), s -> {

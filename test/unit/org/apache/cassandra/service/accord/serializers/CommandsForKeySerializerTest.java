@@ -50,7 +50,6 @@ import accord.api.DataStore;
 import accord.api.Journal;
 import accord.api.Key;
 import accord.api.ProgressLog;
-import accord.api.ProtocolModifiers;
 import accord.api.Result;
 import accord.api.RoutingKey;
 import accord.api.Timeouts;
