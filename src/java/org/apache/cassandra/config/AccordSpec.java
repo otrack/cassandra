@@ -140,6 +140,7 @@ public class AccordSpec
     public volatile DurationSpec.IntMillisecondsBound recover_delay = new DurationSpec.IntMillisecondsBound(5000);
     public volatile DurationSpec.IntMillisecondsBound range_syncpoint_recover_delay = new DurationSpec.IntMillisecondsBound("5m");
     public String slowPreAccept = "30ms <= p50*2 <= 100ms";
+
     public String slowRead = "30ms <= p50*2 <= 100ms";
 
     public long recoveryDelayFor(TxnId txnId, TimeUnit unit)

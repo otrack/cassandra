@@ -106,6 +106,7 @@ public abstract class AccordRoutingKey extends AccordRoutableKey implements Rout
         {
             super(table);
             this.isMin = isMin;
+
         }
 
         @Override

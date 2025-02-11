@@ -1677,7 +1677,7 @@ internode_compression: dc
 # Disabling it will result in larger (but fewer) network packets being sent,
 # reducing overhead from the TCP protocol itself, at the cost of increasing
 # latency if you block for cross-datacenter responses.
-inter_dc_tcp_nodelay: false
+inter_dc_tcp_nodelay: true
 
 # TTL for different trace types used during logging of the repair process.
 # Min unit: s
@@ -2312,21 +2312,21 @@ drop_compact_storage_enabled: false
 #
 storage_compatibility_mode: NONE
 
-#accord:
-#  # Enables the execution of Accord (multi-key) transactions on this node.
-#  enabled: false
-#
-#  # Journal directory for Accord
-#  journal_directory:
-#
-#  # The number of Accord shards on this node; -1 means use the number of cores
-#  queue_shard_count: -1
-#
-#  # The number of Accord shards on this node; -1 means use the number of cores
-#  command_store_shard_count: -1
-#
-#  # Recover delay: the time between a transaction being initiated and a remote replica being willing to interrupt it to complete it
-#  recover_delay: 1s
-#
-#  # how quickly the fast path is reconfigured when nodes go up/down
-#  fast_path_update_delay: 5s
+accord:
+ # Enables the execution of Accord (multi-key) transactions on this node.
+ enabled: true
+
+ # Journal directory for Accord
+ journal_directory: /tmp
+
+ # The number of Accord shards on this node; -1 means use the number of cores
+ queue_shard_count: -1
+
+ # The number of Accord shards on this node; -1 means use the number of cores
+ command_store_shard_count: -1
+
+ # Recover delay: the time between a transaction being initiated and a remote replica being willing to interrupt it to complete it
+ recover_delay: 1s
+
+ # how quickly the fast path is reconfigured when nodes go up/down
+ fast_path_update_delay: 5s

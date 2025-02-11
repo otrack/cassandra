@@ -128,8 +128,8 @@ USING_G1=$?
 # times. If in doubt, and if you do not particularly want to tweak, go with
 # 100 MB per physical CPU core.
 
-#MAX_HEAP_SIZE="4G"
-#HEAP_NEWSIZE="800M"
+MAX_HEAP_SIZE="4G"
+HEAP_NEWSIZE="800M"
 
 # Set this to control the amount of arenas per-thread in glibc
 #export MALLOC_ARENA_MAX=4
@@ -155,6 +155,8 @@ elif [ $DEFINED_XMX -ne 0 ] || [ $DEFINED_XMS -ne 0 ]; then
      echo "Please set or unset -Xmx and -Xms flags in pairs on jvm-server.options file."
      exit 1
 fi
+
+echo $JVM_OPTS
 
 # We only set -Xmn flag if it was not defined in jvm-server.options file
 # and if the CMS GC is being used
