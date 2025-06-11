@@ -116,7 +116,7 @@ calculate_heap_sizes
 # or not (if you set one, set the other).
 
 MAX_HEAP_SIZE="4G"
-HEAP_NEWSIZE="800M"
+#HEAP_NEWSIZE="800M"
 #MAX_DIRECT_MEMORY_SIZE="10G"
 
 # Set this to control the amount of arenas per-thread in glibc
