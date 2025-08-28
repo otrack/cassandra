@@ -34,7 +34,8 @@
 //  - cassandra-small        : 1 cpu, 1GB ram (alias for above but for any arch)
 //  - cassandra-amd64-medium : 3 cpu, 5GB ram
 //  - cassandra-medium       : 3 cpu, 5GB ram (alias for above but for any arch)
-//  - cassandra-amd64-large  : 7 cpu, 14GB ram
+//  - cassandra-amd64-large  : 7 cpu, 16GB ram
+//  - cassandra-large  : 7 cpu, 16GB ram
 //
 // When running builds parameterised to other architectures the corresponding labels are expected.
 //  For example 'arm64' requires the labels: cassandra-arm64-small, cassandra-arm64-medium, cassandra-arm64-large.
@@ -396,6 +397,13 @@ def test(command, cell) {
                 archiveArtifacts artifacts: "${logfile}", fingerprint: true
               }
               if (0 != status) { error("Stage ${cell.step}${cell_suffix} failed with exit status ${status}") }
+            } catch (exc) {
+              if (exc.getClass().getName() == "org.jenkinsci.plugins.workflow.steps.FlowInterruptedException") {
+                for (def causeOfInterruption in exc.getCauses()) {
+                  echo "CauseOfInterruption: ${causeOfInterruption.getClass().getName()} - ${causeOfInterruption.getShortDescription()}"
+                }
+              }
+              throw exc
             } finally {
                 def duration = System.currentTimeMillis() - timer
                 def formattedTime = String.format("%tT.%tL", duration, duration)

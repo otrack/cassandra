@@ -29,10 +29,12 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import accord.api.Agent;
-import accord.api.EventListener;
+import accord.api.CoordinatorEventListener;
+import accord.api.LocalEventListener;
 import accord.api.ProgressLog.BlockedUntil;
-import accord.api.Result;
 import accord.api.RoutingKey;
+import accord.api.Tracing;
+import accord.api.TraceEventType;
 import accord.local.Command;
 import accord.local.Node;
 import accord.local.SafeCommand;
@@ -40,7 +42,6 @@ import accord.local.SafeCommandStore;
 import accord.local.TimeService;
 import accord.messages.ReplyContext;
 import accord.primitives.Keys;
-import accord.primitives.Participants;
 import accord.primitives.Ranges;
 import accord.primitives.Routable;
 import accord.primitives.Status;
@@ -64,6 +65,7 @@ import org.apache.cassandra.exceptions.RequestTimeoutException;
 import org.apache.cassandra.metrics.AccordMetrics;
 import org.apache.cassandra.net.ResponseContext;
 import org.apache.cassandra.service.accord.AccordService;
+import org.apache.cassandra.service.accord.AccordTracing;
 import org.apache.cassandra.service.accord.serializers.TableMetadatasAndKeys;
 import org.apache.cassandra.service.accord.txn.TxnQuery;
 import org.apache.cassandra.service.accord.txn.TxnRead;
@@ -101,7 +103,7 @@ public class AccordAgent implements Agent
         if (invoke != null) invoke.accept(txnId, cause);
     }
 
-
+    private final AccordTracing tracing = new AccordTracing();
     private final RandomSource random = new DefaultRandom();
     protected Node.Id self;
 
@@ -109,14 +111,20 @@ public class AccordAgent implements Agent
     {
     }
 
-    public void setNodeId(Node.Id id)
+    public AccordTracing tracing()
     {
-        self = id;
+        return tracing;
     }
 
     @Override
-    public void onRecover(Node node, Result success, Throwable fail)
+    public @Nullable Tracing trace(TxnId txnId, TraceEventType eventType)
     {
+        return tracing.trace(txnId, eventType);
+    }
+
+    public void setNodeId(Node.Id id)
+    {
+        self = id;
     }
 
     @Override
@@ -144,9 +152,13 @@ public class AccordAgent implements Agent
     @Override
     public void onUncaughtException(Throwable t)
     {
+        handleUncaughtException(t);
+    }
+
+    public static void handleUncaughtException(Throwable t)
+    {
         if (t instanceof RequestTimeoutException || t instanceof CancellationException)
             return;
-        logger.error("Uncaught accord exception", t);
         JVMStabilityInspector.uncaughtException(Thread.currentThread(), t);
     }
 
@@ -154,7 +166,7 @@ public class AccordAgent implements Agent
     public void onCaughtException(Throwable t, String context)
     {
         logger.warn(context, t);
-        JVMStabilityInspector.uncaughtException(Thread.currentThread(), t);
+        JVMStabilityInspector.inspectThrowable(t);
     }
 
     @Override
@@ -192,10 +204,11 @@ public class AccordAgent implements Agent
         return SECONDS.toMicros(1);
     }
 
+    // TODO (expected): I don't think we even need this - just prune each time we have doubled in size
     @Override
     public long maxConflictsPruneInterval()
     {
-        return 100;
+        return 1024;
     }
 
     /**
@@ -209,7 +222,13 @@ public class AccordAgent implements Agent
     }
 
     @Override
-    public EventListener eventListener()
+    public CoordinatorEventListener coordinatorEvents()
+    {
+        return AccordMetrics.Listener.instance;
+    }
+
+    @Override
+    public LocalEventListener localEvents()
     {
         return AccordMetrics.Listener.instance;
     }
@@ -223,18 +242,26 @@ public class AccordAgent implements Agent
         Command command = safeCommand.current();
         Invariants.nonNull(command);
 
-        Timestamp mostRecentAttempt = Timestamp.max(command.txnId(), command.promised());
         RoutingKey homeKey = command.route().homeKey();
         Shard shard = node.topology().forEpochIfKnown(homeKey, command.txnId().epoch());
 
         // TODO (expected): make this a configurable calculation on normal request latencies (like ContentionStrategy)
+        long nowMicros = MILLISECONDS.toMicros(Clock.Global.currentTimeMillis());
         long oneSecond = SECONDS.toMicros(1L);
-        long startTime = mostRecentAttempt.hlc() + recover(txnId).computeWait(retryCount, MICROSECONDS);
+        long promisedHlc = command.promised().hlc();
+        if (promisedHlc > nowMicros + TimeUnit.MINUTES.toMicros(1))
+            promisedHlc = 0;
+        long mostRecentStart = Math.max(command.txnId().hlc(), promisedHlc);
+        long waitMicros = recover(txnId).computeWait(retryCount, MICROSECONDS);
+        if (mostRecentStart > nowMicros + SECONDS.toMicros(1L))
+            logger.warn("max({},{})>{}", command.txnId(), command.promised(), nowMicros);
+        long startTime = mostRecentStart + waitMicros;
+        if (startTime < nowMicros)
+            startTime = nowMicros + waitMicros/2;
 
         startTime = nonClashingStartTime(startTime, shard == null ? null : shard.nodes, node.id(), oneSecond, random);
-        long nowMicros = MILLISECONDS.toMicros(Clock.Global.currentTimeMillis());
         long delayMicros = Math.max(1, startTime - nowMicros);
-        Invariants.require(delayMicros < TimeUnit.HOURS.toMicros(1L));
+        Invariants.require(delayMicros < TimeUnit.HOURS.toMicros(1L), "unexpectedly long coordination recovery delay proposed: %d (start %d, now %d)", delayMicros, startTime, nowMicros, command.txnId(), command.promised());
         return units.convert(delayMicros, MICROSECONDS);
     }
 
@@ -338,7 +365,7 @@ public class AccordAgent implements Agent
 
         logger.debug("Waiting {} micros for {} to be stale", waitMicros, staleId);
         AsyncResult.Settable<TxnId> result = AsyncResults.settable();
-        node.scheduler().selfRecurring(() -> result.setSuccess(staleId), waitMicros, MICROSECONDS);
+        node.scheduler().once(() -> result.setSuccess(staleId), waitMicros, MICROSECONDS);
         return result;
     }
 
@@ -346,11 +373,5 @@ public class AccordAgent implements Agent
     public long minStaleHlc(Node node, boolean requested)
     {
         return node.now() - (100 + getAccordScheduleDurabilityTxnIdLag(MICROSECONDS));
-    }
-
-    @Override
-    public void onViolation(String message, Participants<?> participants, @Nullable TxnId notWitnessed, @Nullable Timestamp notWitnessedExecuteAt, @Nullable TxnId by, @Nullable Timestamp byEexecuteAt)
-    {
-        logger.error(message);
     }
 }

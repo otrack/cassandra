@@ -51,6 +51,7 @@ public interface AccordTopologyUpdate
     void applyTo(TopologyImage accumulator);
     long epoch();
 
+    Journal.TopologyUpdate getUpdate();
     static AccordTopologyUpdate newTopology(Journal.TopologyUpdate update)
     {
         return new NewTopology(update);
@@ -111,10 +112,7 @@ public interface AccordTopologyUpdate
                 out.writeUnsignedVInt32(e.getKey());
                 RangesForEpochSerializer.instance.serialize(e.getValue(), out);
             }
-            //TODO (desired): local to what?  Rather than serializing local we can serialize the node its relative too?  that why when we deserialize we do globa.forNode(node)
-            // this also decreases the size as we don't have redundent shards
-            TopologySerializers.topology.serialize(from.local, out);
-            TopologySerializers.topology.serialize(from.global, out);
+            TopologySerializers.compactTopology.serialize(from.global, out);
         }
 
         @Override
@@ -128,9 +126,8 @@ public interface AccordTopologyUpdate
                 CommandStores.RangesForEpoch rangesForEpoch = RangesForEpochSerializer.instance.deserialize(in);
                 commandStores.put(commandStoreId, rangesForEpoch);
             }
-            Topology local = TopologySerializers.topology.deserialize(in);
-            Topology global = TopologySerializers.topology.deserialize(in);
-            return new Journal.TopologyUpdate(commandStores, local, global);
+            Topology global = TopologySerializers.compactTopology.deserialize(in);
+            return new Journal.TopologyUpdate(commandStores, global);
         }
 
         @Override
@@ -143,8 +140,7 @@ public interface AccordTopologyUpdate
                 size += RangesForEpochSerializer.instance.serializedSize(e.getValue());
             }
 
-            size += TopologySerializers.topology.serializedSize(from.local);
-            size += TopologySerializers.topology.serializedSize(from.global);
+            size += TopologySerializers.compactTopology.serializedSize(from.global);
             return size;
         }
     }
@@ -161,9 +157,25 @@ public interface AccordTopologyUpdate
             switch (t.kind())
             {
                 case NewTopology:
+                {
                     TopologyUpdateSerializer.instance.serialize(((NewTopology) t).update, out);
                     break;
-                case Topologies:
+                }
+                case NoOp:
+                {
+                    TopologyImage image = (TopologyImage) t;
+                    Invariants.require(image.update == null);
+                    if (image.syncStatus == null)
+                        out.writeByte(Byte.MAX_VALUE);
+                    else
+                        out.writeByte(image.syncStatus.ordinal());
+
+                    KeySerializers.ranges.serialize(image.closed, out);
+                    KeySerializers.ranges.serialize(image.retired, out);
+                    break;
+                }
+                case TopologyImage:
+                {
                     TopologyImage image = (TopologyImage) t;
 
                     out.writeBoolean(image.update != null);
@@ -177,6 +189,7 @@ public interface AccordTopologyUpdate
                     KeySerializers.ranges.serialize(image.closed, out);
                     KeySerializers.ranges.serialize(image.retired, out);
                     break;
+                }
                 default:
                     throw new UnhandledEnum(t.kind());
             }
@@ -191,9 +204,20 @@ public interface AccordTopologyUpdate
             {
                 case NewTopology:
                     return new NewTopology(TopologyUpdateSerializer.instance.deserialize(in));
-                case Topologies:
+                case NoOp:
                 {
-                    TopologyImage image = new TopologyImage(epoch);
+                    TopologyImage image = new TopologyImage(epoch, Kind.NoOp);
+                    byte syncStateByte = in.readByte();
+                    if (syncStateByte != Byte.MAX_VALUE)
+                        image.syncStatus = AccordConfigurationService.SyncStatus.values()[syncStateByte];
+
+                    image.closed = KeySerializers.ranges.deserialize(in);
+                    image.retired = KeySerializers.ranges.deserialize(in);
+                    return image;
+                }
+                case TopologyImage:
+                {
+                    TopologyImage image = new TopologyImage(epoch, Kind.TopologyImage);
                     if (in.readBoolean())
                         image.update = TopologyUpdateSerializer.instance.deserialize(in);
 
@@ -221,7 +245,19 @@ public interface AccordTopologyUpdate
                 case NewTopology:
                     size += TopologyUpdateSerializer.instance.serializedSize(((NewTopology) t).update);
                     break;
-                case Topologies:
+                case NoOp:
+                {
+                    TopologyImage image = (TopologyImage) t;
+                    Invariants.require(image.update == null);
+
+                    size += Byte.BYTES;
+
+                    size += KeySerializers.ranges.serializedSize(image.closed);
+                    size += KeySerializers.ranges.serializedSize(image.retired);
+                    break;
+                }
+                case TopologyImage:
+                {
                     TopologyImage image = (TopologyImage) t;
 
                     size += TypeSizes.sizeof(image.update != null);
@@ -233,6 +269,7 @@ public interface AccordTopologyUpdate
                     size += KeySerializers.ranges.serializedSize(image.closed);
                     size += KeySerializers.ranges.serializedSize(image.retired);
                     break;
+                }
                 default:
                     throw new UnhandledEnum(t.kind());
             }
@@ -242,15 +279,19 @@ public interface AccordTopologyUpdate
 
     enum Kind
     {
+        // New Topology, written to journal when the node first learned about it
         NewTopology,
-        Topologies
+        // Used when accumulating state during compaction or replay
+        TopologyImage,
+        // Effectively unchanged topology
+        NoOp
     }
 
     class ImmutableTopoloyImage extends Journal.TopologyUpdate
     {
         public ImmutableTopoloyImage(TopologyImage image)
         {
-            super(image.update.commandStores, image.update.local, image.update.global);
+            super(image.update.commandStores, image.update.global);
         }
     }
 
@@ -263,10 +304,30 @@ public interface AccordTopologyUpdate
         private Ranges retired = Ranges.EMPTY;
 
         private final long epoch;
+        private final Kind kind;
 
-        public TopologyImage(long epoch)
+        public TopologyImage(long epoch, Kind kind)
         {
+            Invariants.require(kind != Kind.NewTopology);
             this.epoch = epoch;
+            this.kind = kind;
+        }
+
+        public TopologyImage asImage(Journal.TopologyUpdate update)
+        {
+            TopologyImage image = new TopologyImage(epoch, Kind.TopologyImage);
+            image.update = update.cloneWithEquivalentEpoch(epoch);
+            image.closed = closed;
+            image.retired = retired;
+            return image;
+        }
+
+        public TopologyImage asNoOp()
+        {
+            TopologyImage image = new TopologyImage(epoch, Kind.NoOp);
+            image.closed = closed;
+            image.retired = retired;
+            return image;
         }
 
         @Override
@@ -276,9 +337,15 @@ public interface AccordTopologyUpdate
         }
 
         @Override
+        public Journal.TopologyUpdate getUpdate()
+        {
+            return update;
+        }
+
+        @Override
         public Kind kind()
         {
-            return Kind.Topologies;
+            return kind;
         }
 
         @Override
@@ -325,6 +392,12 @@ public interface AccordTopologyUpdate
         public long epoch()
         {
             return this.epoch;
+        }
+
+        @Override
+        public Journal.TopologyUpdate getUpdate()
+        {
+            return update;
         }
 
         @Override
@@ -385,7 +458,7 @@ public interface AccordTopologyUpdate
         @Override
         protected NavigableMap<Long, TopologyImage> accumulate(NavigableMap<Long, TopologyImage> allEpochs, AccordTopologyUpdate update)
         {
-            update.applyTo(allEpochs.computeIfAbsent(update.epoch(), v -> new TopologyImage(update.epoch())));
+            update.applyTo(allEpochs.computeIfAbsent(update.epoch(), v -> new TopologyImage(update.epoch(), Kind.TopologyImage)));
             return allEpochs;
         }
     }
@@ -434,8 +507,16 @@ public interface AccordTopologyUpdate
         public void reserialize(JournalKey key, Accumulator from, DataOutputPlus out, Version version) throws IOException
         {
             out.writeUnsignedVInt32(from.get().size());
+            Journal.TopologyUpdate prev = null;
             for (TopologyImage value : from.get().values())
+            {
+                Journal.TopologyUpdate tmp = value.update;
+                if (prev != null && value.update.isEquivalent(prev))
+                    value = value.asNoOp();
+
+                prev = tmp;
                 Serializer.instance.serialize(value, out);
+            }
         }
 
         @Override
@@ -443,13 +524,18 @@ public interface AccordTopologyUpdate
         {
             long minEpoch = this.minEpoch.epoch();
             int count = in.readUnsignedVInt32();
+            AccordTopologyUpdate prev = null;
             while (--count >= 0)
             {
                 AccordTopologyUpdate update = Serializer.instance.deserialize(in);
+                if (update.kind() == Kind.NoOp)
+                {
+                    Invariants.require(prev != null);
+                    update = ((TopologyImage) update).asImage(prev.getUpdate());
+                }
                 if (update.epoch() >= minEpoch)
                     into.update(update);
-                else
-                    return;
+                prev = update;
             }
         }
     }

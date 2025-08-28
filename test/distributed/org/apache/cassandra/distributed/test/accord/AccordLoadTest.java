@@ -30,6 +30,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -42,6 +43,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.config.CassandraRelevantProperties;
+import org.apache.cassandra.db.commitlog.CommitLog;
 import org.apache.cassandra.distributed.Cluster;
 import org.apache.cassandra.distributed.api.ConsistencyLevel;
 import org.apache.cassandra.distributed.api.Feature;
@@ -50,6 +52,8 @@ import org.apache.cassandra.distributed.api.IMessage;
 import org.apache.cassandra.distributed.api.IMessageFilters;
 import org.apache.cassandra.distributed.shared.DistributedTestBase;
 import org.apache.cassandra.net.Verb;
+import org.apache.cassandra.schema.Schema;
+import org.apache.cassandra.service.accord.AccordKeyspace;
 import org.apache.cassandra.service.accord.AccordService;
 import org.apache.cassandra.utils.EstimatedHistogram;
 
@@ -57,6 +61,7 @@ import static java.lang.System.currentTimeMillis;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static java.util.concurrent.TimeUnit.NANOSECONDS;
 import static java.util.concurrent.TimeUnit.SECONDS;
+import static org.apache.cassandra.db.ColumnFamilyStore.FlushReason.UNIT_TESTS;
 
 public class AccordLoadTest extends AccordTestBase
 {
@@ -69,10 +74,11 @@ public class AccordLoadTest extends AccordTestBase
 //        AccordTestBase.setupCluster(builder -> builder, 3);
         AccordTestBase.setupCluster(builder -> builder.withConfig(config -> config
                                                                             .with(Feature.NETWORK, Feature.GOSSIP)
-                                                                            .set("accord.shard_durability_target_splits", "64")
-                                                                            .set("accord.shard_durability_cycle", "5m")
+                                                                            .set("accord.shard_durability_target_splits", "8")
+                                                                            .set("accord.shard_durability_max_splits", "16")
+                                                                            .set("accord.shard_durability_cycle", "1m")
 //                                                                            .set("accord.ephemeral_read_enabled", "true")
-                                                                            .set("accord.gc_delay", "5s")), 3);
+                                                                             ), 3);
     }
 
     @Ignore
@@ -98,14 +104,16 @@ public class AccordLoadTest extends AccordTestBase
 
             ICoordinator coordinator = cluster.coordinator(1);
             final int repairInterval = Integer.MAX_VALUE;
-            //                 final int repairInterval = 3000;
-            final int compactionInterval = Integer.MAX_VALUE;
-//                     final int compactionInterval = 3000;
-            final int flushInterval = Integer.MAX_VALUE;
-//                     final int flushInterval = 1000;
-            final int compactionPeriodSeconds = 1;
-            final int restartInterval = 150_000_000;
-            final int batchSizeLimit = 1000;
+            final int compactionInterval = 20_000;
+//            final int flushInterval = 50_000;
+            final int journalFlushInterval = 2_000;
+            final int cfkFlushInterval = 10_000;
+            final int dataFlushInterval = 10_000;
+            final int compactionPeriodSeconds = 0;
+            int restartInterval = 30_000;
+            final int restartDecay = 2;
+//            final int restartInterval = Integer.MAX_VALUE;
+            final int batchSizeLimit = 200;
             final long batchTime = TimeUnit.SECONDS.toNanos(10);
             final int concurrency = 100;
             final int ratePerSecond = 1000;
@@ -113,7 +121,9 @@ public class AccordLoadTest extends AccordTestBase
             final float readChance = 0.33f;
             long nextRepairAt = repairInterval;
             long nextCompactionAt = compactionInterval;
-            long nextFlushAt = flushInterval;
+            long nextJournalFlushAt = journalFlushInterval;
+            long nextDataFlushAt = dataFlushInterval;
+            long nextCfkFlushAt = cfkFlushInterval;
             long nextRestartAt = restartInterval;
             final ExecutorService restartExecutor = Executors.newSingleThreadExecutor();
             final BitSet initialised = new BitSet();
@@ -122,15 +132,12 @@ public class AccordLoadTest extends AccordTestBase
             cluster.forEach(i -> i.runOnInstance(() -> {
                 if (compactionPeriodSeconds > 0)
                     ((AccordService) AccordService.instance()).journal().compactor().updateCompactionPeriod(1, SECONDS);
-                //                     ((AccordSpec.JournalSpec)((AccordService) AccordService.instance()).journal().configuration()).segmentSize = 128 << 10;
+//                  ((AccordSpec.JournalSpec)((AccordService) AccordService.instance()).journal().configuration()).segmentSize = 128 << 10;
             }));
 
             Random random = new Random();
-            //                 CopyOnWriteArrayList<Throwable> exceptions = new CopyOnWriteArrayList<>();
             final Semaphore inFlight = new Semaphore(concurrency);
             final RateLimiter rateLimiter = RateLimiter.create(ratePerSecond);
-            //                 long testStart = System.nanoTime();
-            //                 while (NANOSECONDS.toMinutes(System.nanoTime() - testStart) < 10 && exceptions.size() < 10000)
             while (true)
             {
                 final EstimatedHistogram histogram = new EstimatedHistogram(200);
@@ -141,32 +148,49 @@ public class AccordLoadTest extends AccordTestBase
                 {
                     inFlight.acquire();
                     rateLimiter.acquire();
-                    long commandStart = System.nanoTime();
-                    int k = random.nextInt(keyCount);
-                    if (random.nextFloat() < readChance)
+                    try
                     {
-                        coordinator.executeWithResult((success, fail) -> {
-                            inFlight.release();
-                            if (fail == null) histogram.add(NANOSECONDS.toMicros(System.nanoTime() - commandStart));
-                            //                             else exceptions.add(fail);
-                        }, "SELECT * FROM " + qualifiedAccordTableName + " WHERE k = ?;", ConsistencyLevel.SERIAL, k);
+                        long commandStart = System.nanoTime();
+                        int k = random.nextInt(keyCount);
+                        if (random.nextFloat() < readChance)
+                        {
+                            coordinator.executeWithResult((success, fail) -> {
+                                inFlight.release();
+                                if (fail == null) histogram.add(NANOSECONDS.toMicros(System.nanoTime() - commandStart));
+                            }, "SELECT * FROM " + qualifiedAccordTableName + " WHERE k = ?;", ConsistencyLevel.SERIAL, k);
+                        }
+                        else if (initialised.get(k))
+                        {
+                            coordinator.executeWithResult((success, fail) -> {
+                                inFlight.release();
+                                if (fail == null) histogram.add(NANOSECONDS.toMicros(System.nanoTime() - commandStart));
+                            }, "UPDATE " + qualifiedAccordTableName + " SET v += 1 WHERE k = ? IF EXISTS;", ConsistencyLevel.SERIAL, ConsistencyLevel.QUORUM, k);
+                        }
+                        else
+                        {
+                            initialised.set(k);
+                            coordinator.executeWithResult((success, fail) -> {
+                                inFlight.release();
+                                if (fail == null) histogram.add(NANOSECONDS.toMicros(System.nanoTime() - commandStart));
+                                //                             else exceptions.add(fail);
+                            }, "UPDATE " + qualifiedAccordTableName + " SET v = 0 WHERE k = ? IF NOT EXISTS;", ConsistencyLevel.SERIAL, ConsistencyLevel.QUORUM, k);
+                        }
                     }
-                    else if (initialised.get(k))
+                    catch (RejectedExecutionException e)
                     {
-                        coordinator.executeWithResult((success, fail) -> {
-                            inFlight.release();
-                            if (fail == null) histogram.add(NANOSECONDS.toMicros(System.nanoTime() - commandStart));
-                            //                             else exceptions.add(fail);
-                        }, "UPDATE " + qualifiedAccordTableName + " SET v += 1 WHERE k = ? IF EXISTS;", ConsistencyLevel.SERIAL, ConsistencyLevel.QUORUM, k);
-                    }
-                    else
-                    {
-                        initialised.set(k);
-                        coordinator.executeWithResult((success, fail) -> {
-                            inFlight.release();
-                            if (fail == null) histogram.add(NANOSECONDS.toMicros(System.nanoTime() - commandStart));
-                            //                             else exceptions.add(fail);
-                        }, "UPDATE " + qualifiedAccordTableName + " SET v = 0 WHERE k = ? IF NOT EXISTS;", ConsistencyLevel.SERIAL, ConsistencyLevel.QUORUM, k);
+                        inFlight.release();
+                        while (true)
+                        {
+                            try
+                            {
+                                int index = 1 + random.nextInt(cluster.size());
+                                logger.info("Picking new coordinator ... {}", index);
+                                coordinator = cluster.coordinator(index);
+                                if (cluster.get(index).callOnInstance(() -> AccordService.started()))
+                                    break;
+                            }
+                            catch (Throwable t) { logger.info("Failed to select coordinator", t); }
+                        }
                     }
                     batchSize++;
                     if (System.nanoTime() >= batchEnd)
@@ -185,30 +209,80 @@ public class AccordLoadTest extends AccordTestBase
                     nextCompactionAt += compactionInterval;
                     System.out.println("compacting accord...");
                     cluster.forEach(i -> {
-                        i.nodetool("compact", "system_accord.journal");
+                        try { i.nodetool("compact", "system_accord.journal"); }
+                        catch (Throwable t) { logger.error("", t); }
                     });
                 }
 
-                if ((nextFlushAt -= batchSize) <= 0)
+                if ((nextJournalFlushAt -= batchSize) <= 0)
                 {
-                    nextFlushAt += flushInterval;
+                    nextJournalFlushAt += journalFlushInterval;
                     System.out.println("flushing journal...");
-                    cluster.forEach(i -> i.runOnInstance(() -> {
-                        ((AccordService) AccordService.instance()).journal().closeCurrentSegmentForTestingIfNonEmpty();
-                    }));
+                    cluster.forEach(i -> {
+                        try
+                        {
+                            i.runOnInstance(() -> {
+                                if (AccordService.started())
+                                    ((AccordService) AccordService.instance()).journal().closeCurrentSegmentForTestingIfNonEmpty();
+                            });
+                        }
+                        catch (Throwable t)
+                        {
+                            logger.error("", t);
+                        }
+                    });
+                }
+
+                if ((nextDataFlushAt -= batchSize) <= 0)
+                {
+                    nextDataFlushAt += dataFlushInterval;
+                    System.out.println("flushing data...");
+                    cluster.forEach(i -> {
+                        try
+                        {
+                            i.acceptOnInstance(name -> {
+                                Schema.instance.getColumnFamilyStoreInstance(Schema.instance.getTableMetadata(KEYSPACE, name).id).forceFlush(UNIT_TESTS);
+                            }, accordTableName);
+                        }
+                        catch (Throwable t)
+                        {
+                            logger.error("", t);
+                        }
+                    });
+                }
+
+                if ((nextCfkFlushAt -= batchSize) <= 0)
+                {
+                    nextCfkFlushAt += cfkFlushInterval;
+                    System.out.println("flushing data...");
+                    cluster.forEach(i -> {
+                        try
+                        {
+                            i.acceptOnInstance(name -> {
+                                if (CommitLog.instance.isStarted())
+                                    AccordKeyspace.AccordColumnFamilyStores.commandsForKey.forceFlush(UNIT_TESTS);
+                            }, accordTableName);
+                        }
+                        catch (Throwable t)
+                        {
+                            logger.error("", t);
+                        }
+                    });
                 }
 
                 if ((nextRestartAt -= batchSize) <= 0)
                 {
                     nextRestartAt += restartInterval;
-                    int nodeIdx = random.nextInt(cluster.size());
-
+                    restartInterval = Math.max(restartInterval, restartInterval * restartDecay);
+                    int nodeIdx = 1 + random.nextInt(cluster.size());
                     restartExecutor.submit(() -> {
                         System.out.printf("restarting node %d...\n", nodeIdx);
                         try
                         {
                             cluster.get(nodeIdx).shutdown().get();
                             cluster.get(nodeIdx).startup();
+                            while (!cluster.get(nodeIdx).callOnInstance(() -> AccordService.started()))
+                                Thread.sleep(1000);
                             return null;
                         }
                         catch (InterruptedException | ExecutionException e)
@@ -258,6 +332,7 @@ public class AccordLoadTest extends AccordTestBase
         catch (Throwable t)
         {
             t.printStackTrace();
+            System.exit(1);
         }
     }
 

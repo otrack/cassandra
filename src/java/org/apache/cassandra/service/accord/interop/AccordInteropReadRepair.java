@@ -24,8 +24,8 @@ import javax.annotation.Nullable;
 import accord.api.Data;
 import accord.local.Node;
 import accord.local.SafeCommandStore;
-import accord.messages.ReadData;
 import accord.messages.MessageType;
+import accord.messages.ReadData;
 import accord.primitives.PartialTxn;
 import accord.primitives.Participants;
 import accord.primitives.Ranges;
@@ -49,8 +49,7 @@ import org.apache.cassandra.service.accord.AccordMessageSink.AccordMessageType;
 import org.apache.cassandra.service.accord.serializers.CommandSerializers;
 import org.apache.cassandra.service.accord.serializers.IVersionedSerializer;
 import org.apache.cassandra.service.accord.serializers.KeySerializers;
-import org.apache.cassandra.service.accord.serializers.ReadDataSerializers;
-import org.apache.cassandra.service.accord.serializers.ReadDataSerializers.ReadDataSerializer;
+import org.apache.cassandra.service.accord.serializers.ReadDataSerializer;
 import org.apache.cassandra.service.accord.serializers.Version;
 
 /**
@@ -60,7 +59,7 @@ import org.apache.cassandra.service.accord.serializers.Version;
  */
 public class AccordInteropReadRepair extends ReadData
 {
-    public static final IVersionedSerializer<AccordInteropReadRepair> requestSerializer = new ReadDataSerializer<AccordInteropReadRepair>()
+    public static final IVersionedSerializer<AccordInteropReadRepair> requestSerializer = new IVersionedSerializer<>()
     {
         @Override
         public void serialize(AccordInteropReadRepair repair, DataOutputPlus out, Version version) throws IOException
@@ -93,9 +92,9 @@ public class AccordInteropReadRepair extends ReadData
 
     static class ReadRepairCallback extends AccordInteropReadCallback<Object>
     {
-        public ReadRepairCallback(Node.Id id, InetAddressAndPort endpoint, Message<?> message, RequestCallback<Object> wrapped, MaximalCommitSender maximalCommitSender)
+        public ReadRepairCallback(Node.Id id, InetAddressAndPort endpoint, Message<?> message, RequestCallback<Object> wrapped, AccordInteropExecution interopExecution)
         {
-            super(id, endpoint, message, wrapped, maximalCommitSender);
+            super(id, endpoint, message, wrapped, interopExecution);
         }
 
         @Override
@@ -119,17 +118,17 @@ public class AccordInteropReadRepair extends ReadData
         public long serializedSize(Data t, Version version) { return 0; }
     };
 
-    public static final IVersionedSerializer<ReadReply> replySerializer = new ReadDataSerializers.ReplySerializer<>(noop_data_serializer);
+    public static final IVersionedSerializer<ReadReply> replySerializer = new ReadDataSerializer.ReplySerializer<>(noop_data_serializer);
 
     public AccordInteropReadRepair(Node.Id to, Topologies topologies, TxnId txnId, Participants<?> scope, long executeAtEpoch, Mutation mutation)
     {
-        super(to, topologies, txnId, scope, executeAtEpoch);
+        super(to, topologies, txnId, scope, null, null, executeAtEpoch);
         this.mutation = mutation;
     }
 
     public AccordInteropReadRepair(TxnId txnId, Participants<?> scope, long executeAtEpoch, Mutation mutation)
     {
-        super(txnId, scope, executeAtEpoch);
+        super(txnId, scope, null, null, executeAtEpoch);
         this.mutation = mutation;
     }
 
@@ -156,9 +155,9 @@ public class AccordInteropReadRepair extends ReadData
     }
 
     @Override
-    protected ReadOk constructReadOk(Ranges unavailable, Data data, long uniqueHlc)
+    protected void reply(Ranges unavailable, Data data, long uniqueHlc)
     {
-        return new InteropReadRepairOk(unavailable, data, uniqueHlc);
+        reply(new InteropReadRepairOk(unavailable, data, uniqueHlc), null);
     }
 
     @Override

@@ -535,8 +535,9 @@ public class Instance extends IsolatedExecutor implements IInvokableInstance
         return runOnCaller -> {
             if (!internodeMessagingStarted)
             {
-                inInstancelogger.debug("Dropping inbound message {} to {} as internode messaging has not been started yet",
-                             message, config().broadcastAddress());
+                if (inInstancelogger != null)
+                    inInstancelogger.debug("Dropping inbound message {} to {} as internode messaging has not been started yet",
+                            message, config().broadcastAddress());
                 return;
             }
             if (message.version() > MessagingService.current_version)
@@ -757,8 +758,6 @@ public class Instance extends IsolatedExecutor implements IInvokableInstance
             CONSISTENT_SIMULTANEOUS_MOVES_ALLOW.setBoolean(true);
         }
 
-        mkdirs();
-
         assert config.networkTopology().contains(config.broadcastAddress()) : String.format("Network topology %s doesn't contain the address %s",
                                                                                             config.networkTopology(), config.broadcastAddress());
         DistributedTestInitialLocationProvider.assign(config.networkTopology());
@@ -772,7 +771,6 @@ public class Instance extends IsolatedExecutor implements IInvokableInstance
         Config.log(DatabaseDescriptor.getRawConfig());
 
         DiskErrorsHandlerService.configure();
-        DatabaseDescriptor.createAllDirectories();
         CassandraDaemon.getInstanceForTesting().migrateSystemDataIfNeeded();
 
         CommitLog.instance.start();
@@ -846,7 +844,6 @@ public class Instance extends IsolatedExecutor implements IInvokableInstance
         JVMStabilityInspector.replaceKiller(new InstanceKiller(Instance.this::shutdown));
 
         StorageService.instance.registerDaemon(CassandraDaemon.getInstanceForTesting());
-
         if (config.has(GOSSIP))
         {
             try
@@ -920,15 +917,6 @@ public class Instance extends IsolatedExecutor implements IInvokableInstance
         sync(() ->
             StorageService.instance.doAuthSetup(false)
         ).run();
-    }
-
-    protected void mkdirs()
-    {
-        new File(config.getString("saved_caches_directory")).tryCreateDirectories();
-        new File(config.getString("hints_directory")).tryCreateDirectories();
-        new File(config.getString("commitlog_directory")).tryCreateDirectories();
-        for (String dir : (String[]) config.get("data_file_directories"))
-            new File(dir).tryCreateDirectories();
     }
 
     private Config loadConfig(IInstanceConfig overrides)
@@ -1207,7 +1195,7 @@ public class Instance extends IsolatedExecutor implements IInvokableInstance
 
         public DTestNodeTool(boolean withNotifications, Output output)
         {
-            super(new InternalNodeProbeFactory(withNotifications), output);
+            super(new InternalNodeProbeFactory(withNotifications, output), output);
             internalNodeProbe = new InternalNodeProbe(withNotifications);
             storageProxy = internalNodeProbe.getStorageService();
             storageProxy.addNotificationListener(notifications, null, null);

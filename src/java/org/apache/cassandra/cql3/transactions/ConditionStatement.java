@@ -25,6 +25,9 @@ import org.apache.cassandra.cql3.QueryOptions;
 import org.apache.cassandra.cql3.terms.Term;
 import org.apache.cassandra.cql3.VariableSpecifications;
 import org.apache.cassandra.service.accord.txn.TxnCondition;
+import org.apache.cassandra.service.accord.txn.TxnReference;
+
+import static org.apache.cassandra.cql3.statements.RequestValidations.checkTrue;
 
 public class ConditionStatement
 {
@@ -100,12 +103,16 @@ public class ConditionStatement
             
             if (lhs instanceof RowDataReference.Raw)
             {
+                if (((RowDataReference.Raw) lhs).column() == null)
+                    throw new IllegalStateException(String.format("Row reference (%s) can only be used with IS NULL/IS NOT NULL conditions", lhs.getText()));
                 reference = ((RowDataReference.Raw) lhs).prepareAsReceiver();
                 ColumnSpecification receiver = reference.getValueReceiver();
                 value = rhs.prepare(keyspace, receiver);
             }
             else if (rhs instanceof RowDataReference.Raw)
             {
+                if (((RowDataReference.Raw) rhs).column() == null)
+                    throw new IllegalStateException(String.format("Row reference (%s) can only be used with IS NULL/IS NOT NULL conditions", rhs.getText()));
                 reference = ((RowDataReference.Raw) rhs).prepareAsReceiver();
                 ColumnSpecification receiver = reference.getValueReceiver();
                 value = lhs.prepare(keyspace, receiver);
@@ -137,7 +144,9 @@ public class ConditionStatement
             case LT:
             case LTE:
                 // TODO: Support for references on LHS and RHS
-                return new TxnCondition.Value(reference.toTxnReference(options),
+                TxnReference ref = reference.toTxnReference(options);
+                checkTrue(ref.kind == TxnReference.Kind.COLUMN, "Condition %s requires COLUMN reference but given %s", kind, ref.kind);
+                return new TxnCondition.Value(ref.asColumn(),
                                               kind.toTxnKind(reversed),
                                               value.bindAndGet(options),
                                               options.getProtocolVersion());

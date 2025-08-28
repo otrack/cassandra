@@ -19,24 +19,40 @@
 package org.apache.cassandra.utils;
 
 import java.util.AbstractList;
-import java.util.AbstractSet;
 import java.util.ArrayList;
 import java.util.Collection;
-import java.util.Iterator;
 import java.util.List;
 import java.util.RandomAccess;
+import java.util.Set;
 
 import org.agrona.collections.Object2IntHashMap;
 
-public class ImmutableUniqueList<T> extends AbstractList<T> implements RandomAccess
+/**
+ * An immutable implementation of {@link UniqueList} that preserves insertion order.
+ * <p>
+ * This class provides:
+ * - Immutability: Once created, the list cannot be modified
+ * - Uniqueness: Each element can only appear once in the list
+ * - Insertion order: Elements are stored and iterated in the order they were first added
+ * <p>
+ * Use the static factory methods or builder to create instances.
+ *
+ * @see #of(Object[])
+ * @see #builder()
+ * @see #builder(int)
+ * @see #empty()
+ * @param <T> the type of elements in this list
+ */
+public class ImmutableUniqueList<T> extends AbstractList<T> implements UniqueList<T>, RandomAccess
 {
     private static final ImmutableUniqueList<Object> EMPTY = ImmutableUniqueList.builder().build();
 
     private final T[] values;
     private final Object2IntHashMap<T> indexLookup;
-    private transient AsSet asSet = null;
+
     private ImmutableUniqueList(Builder<T> builder)
     {
+        //noinspection unchecked
         values = (T[]) builder.values.toArray(Object[]::new);
         indexLookup = new Object2IntHashMap<>(builder.indexLookup);
     }
@@ -57,23 +73,20 @@ public class ImmutableUniqueList<T> extends AbstractList<T> implements RandomAcc
         return new Builder<>(expectedSize);
     }
 
+    @SuppressWarnings("unchecked")
     public static <T> ImmutableUniqueList<T> empty()
     {
         return (ImmutableUniqueList<T>) EMPTY;
     }
 
+    @SafeVarargs
     public static <T> ImmutableUniqueList<T> of(T... values)
     {
         Builder<T> builder = builder(values.length);
         for (T v : values)
-            builder.add(v);
+            if (!builder.maybeAdd(v))
+                throw new IllegalArgumentException("Unable to add " + v +  " as its a duplicate");
         return builder.build();
-    }
-
-    public AsSet asSet()
-    {
-        if (asSet != null) return asSet;
-        return asSet = new AsSet();
     }
 
     @Override
@@ -107,6 +120,23 @@ public class ImmutableUniqueList<T> extends AbstractList<T> implements RandomAcc
         return values.length;
     }
 
+    @Override
+    public boolean equals(Object o)
+    {
+        if (o == this)
+            return true;
+        if (o instanceof List)
+            return super.equals(o);
+        if (o instanceof Set)
+        {
+            Set<?> other = (Set<?>) o;
+            if (other.size() != size())
+                return false;
+            return containsAll(other);
+        }
+        return false;
+    }
+
     public static final class Builder<T>
     {
         private final List<T> values;
@@ -123,12 +153,18 @@ public class ImmutableUniqueList<T> extends AbstractList<T> implements RandomAcc
             this.values = new ArrayList<>(expectedSize);
         }
 
-        public Builder<T> add(T t)
+        public boolean maybeAdd(T t)
         {
-            if (indexLookup.containsKey(t)) return this;
+            if (indexLookup.containsKey(t)) return false;
             int idx = this.idx++;
             indexLookup.put(t, idx);
             values.add(t);
+            return true;
+        }
+
+        public Builder<T> add(T t)
+        {
+            maybeAdd(t);
             return this;
         }
 
@@ -136,6 +172,12 @@ public class ImmutableUniqueList<T> extends AbstractList<T> implements RandomAcc
         {
             c.forEach(this::add);
             return this;
+        }
+
+        public int indexOf(T t)
+        {
+            if (!indexLookup.containsKey(t)) return -1;
+            return indexLookup.get(t);
         }
 
         public void clear()
@@ -155,21 +197,6 @@ public class ImmutableUniqueList<T> extends AbstractList<T> implements RandomAcc
             ImmutableUniqueList<T> list = new ImmutableUniqueList<>(this);
             clear();
             return list;
-        }
-    }
-
-    public class AsSet extends AbstractSet<T>
-    {
-        @Override
-        public Iterator<T> iterator()
-        {
-            return ImmutableUniqueList.this.iterator();
-        }
-
-        @Override
-        public int size()
-        {
-            return values.length;
         }
     }
 }

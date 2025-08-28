@@ -34,6 +34,7 @@ import java.util.stream.IntStream;
 import com.google.common.collect.Sets;
 import org.junit.Assert;
 
+import accord.api.AsyncExecutor;
 import accord.api.Data;
 import accord.api.Journal;
 import accord.api.ProgressLog.NoOpProgressLog;
@@ -52,6 +53,7 @@ import accord.local.Node.Id;
 import accord.local.NodeCommandStoreService;
 import accord.local.PreLoadContext;
 import accord.local.SafeCommandStore;
+import accord.local.SequentialAsyncExecutor;
 import accord.local.StoreParticipants;
 import accord.local.TimeService;
 import accord.local.durability.DurabilityService;
@@ -74,11 +76,12 @@ import accord.topology.Shard;
 import accord.topology.Topology;
 import accord.topology.TopologyManager;
 import accord.utils.SortedArrays.SortedArrayList;
+import accord.utils.async.AsyncChain;
 import accord.utils.async.AsyncChains;
+import accord.utils.async.Cancellable;
 import org.apache.cassandra.ServerTestUtils;
 import org.apache.cassandra.concurrent.ExecutorPlus;
 import org.apache.cassandra.concurrent.ManualExecutor;
-import org.apache.cassandra.concurrent.Stage;
 import org.apache.cassandra.config.AccordSpec;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.config.DurationSpec;
@@ -96,6 +99,7 @@ import org.apache.cassandra.schema.Schema;
 import org.apache.cassandra.schema.TableId;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.service.ClientState;
+import org.apache.cassandra.service.accord.AccordCacheEntry.LoadExecutor;
 import org.apache.cassandra.service.accord.api.AccordAgent;
 import org.apache.cassandra.service.accord.api.PartitionKey;
 import org.apache.cassandra.service.accord.serializers.TableMetadatas;
@@ -105,6 +109,7 @@ import org.apache.cassandra.service.accord.txn.TxnQuery;
 import org.apache.cassandra.service.accord.txn.TxnRead;
 import org.apache.cassandra.utils.Pair;
 import org.apache.cassandra.utils.concurrent.Condition;
+import org.apache.cassandra.utils.concurrent.Future;
 import org.apache.cassandra.utils.concurrent.UncheckedInterruptedException;
 
 import static accord.primitives.Routable.Domain.Key;
@@ -115,7 +120,6 @@ import static accord.primitives.Txn.Kind.Write;
 import static accord.utils.async.AsyncChains.getUninterruptibly;
 import static java.lang.String.format;
 import static org.apache.cassandra.service.accord.AccordExecutor.Mode.RUN_WITH_LOCK;
-import static org.apache.cassandra.service.accord.AccordExecutor.wrap;
 
 public class AccordTestUtils
 {
@@ -174,10 +178,32 @@ public class AccordTestUtils
         };
     }
 
-    public static <K, V> void testLoad(ManualExecutor executor, AccordCache.Type<K, V, ?>.Instance instance, AccordSafeState<K, V> safeState, V val)
+    private static <P1, P2> LoadExecutor<P1, P2> loadExecutor(ExecutorPlus executor)
+    {
+        return new LoadExecutor<>()
+        {
+            @Override
+            public <K, V> Cancellable load(P1 p1, P2 p2, AccordCacheEntry<K, V> entry)
+            {
+                Future<?> future = executor.submit(() -> {
+                    V v;
+                    try { v = entry.owner.parent().adapter().load(entry.owner.commandStore, entry.key()); }
+                    catch (Throwable t)
+                    {
+                        entry.failedToLoad();
+                        throw t;
+                    }
+                    entry.loaded(v);
+                });
+                return () -> future.cancel(true);
+            }
+        };
+    }
+
+    public static <K, V> void testLoad(ManualExecutor executor, AccordSafeState<K, V> safeState, V val)
     {
         Assert.assertEquals(AccordCacheEntry.Status.WAITING_TO_LOAD, safeState.global().status());
-        safeState.global().load(wrap(executor), null, instance.parent().adapter(), AccordCacheEntry.OnLoaded.immediate());
+        safeState.global().load(loadExecutor(executor), null, null);
         Assert.assertEquals(AccordCacheEntry.Status.LOADING, safeState.global().status());
         executor.runOne();
         Assert.assertEquals(AccordCacheEntry.Status.LOADED, safeState.global().status());
@@ -210,35 +236,24 @@ public class AccordTestUtils
         return Ballot.fromValues(epoch, hlc, new Node.Id(node));
     }
 
-    public static Pair<Writes, Result> processTxnResult(AccordCommandStore commandStore, TxnId txnId, PartialTxn txn, Timestamp executeAt) throws Throwable
+    public static AsyncChain<Pair<Writes, Result>> processTxnResult(AccordCommandStore commandStore, TxnId txnId, PartialTxn txn, Timestamp executeAt) throws Throwable
     {
-        AtomicReference<Pair<Writes, Result>> result = new AtomicReference<>();
-        getUninterruptibly(commandStore.execute(PreLoadContext.contextFor(txn.keys().toParticipants()),
+        AtomicReference<AsyncChain<Pair<Writes, Result>>> result = new AtomicReference<>();
+        getUninterruptibly(commandStore.execute((PreLoadContext.Empty)() -> "Test",
                            safeStore -> result.set(processTxnResultDirect(safeStore, txnId, txn, executeAt))));
         return result.get();
     }
 
-    public static Pair<Writes, Result> processTxnResultDirect(SafeCommandStore safeStore, TxnId txnId, PartialTxn txn, Timestamp executeAt)
+    public static AsyncChain<Pair<Writes, Result>> processTxnResultDirect(SafeCommandStore safeStore, TxnId txnId, PartialTxn txn, Timestamp executeAt)
     {
         TxnRead read = (TxnRead) txn.read();
-        Data readData = read.keys().stream().map(key -> {
-                                try
-                                {
-                                    return AsyncChains.getBlocking(read.read(key, safeStore, executeAt, null));
-                                }
-                                catch (InterruptedException e)
-                                {
-                                    throw new UncheckedInterruptedException(e);
-                                }
-                                catch (ExecutionException e)
-                                {
-                                    throw new RuntimeException(e);
-                                }
-                            })
-                            .reduce(null, TxnData::merge);
-        return Pair.create(txnId.is(Write) ? txn.execute(txnId, executeAt, readData) : null,
-                           txn.query().compute(txnId, executeAt, txn.keys(), readData, txn.read(), txn.update()));
-
+        return AsyncChains.allOf(read.keys().stream().map(key -> read.read(safeStore, key, executeAt))
+                                                          .collect(Collectors.toList()))
+                                               .map(list -> {
+                                                   Data data = list.stream().reduce(Data::merge).orElse(new TxnData());
+                                                   return Pair.create(txnId.is(Write) ? txn.execute(txnId, executeAt, data) : null,
+                                                                      txn.query().compute(txnId, executeAt, txn.keys(), data, txn.read(), txn.update()));
+                                               });
     }
 
     public static String wrapInTxn(String query)
@@ -331,9 +346,9 @@ public class AccordTestUtils
     }
 
     public static AccordCommandStore createAccordCommandStore(
-        Node.Id node, LongSupplier now, Topology topology, ExecutorPlus loadExecutor, ExecutorPlus saveExecutor)
+        Node.Id node, LongSupplier now, Topology topology)
     {
-        AccordExecutor executor = new AccordExecutorSyncSubmit(0, RUN_WITH_LOCK, CommandStore.class.getSimpleName() + '[' + 0 + ']', new AccordCacheMetrics("test"), loadExecutor, saveExecutor, loadExecutor, new AccordAgent());
+        AccordExecutor executor = new AccordExecutorSyncSubmit(0, RUN_WITH_LOCK, CommandStore.class.getSimpleName() + '[' + 0 + ']', new AccordCacheMetrics("test"), new AccordAgent());
         return createAccordCommandStore(node, now, topology, executor);
     }
 
@@ -342,7 +357,20 @@ public class AccordTestUtils
     {
         NodeCommandStoreService time = new NodeCommandStoreService()
         {
+            @Override
+            public AsyncExecutor someExecutor()
+            {
+                return null;
+            }
+
+            @Override
+            public SequentialAsyncExecutor someSequentialExecutor()
+            {
+                return null;
+            }
+
             private ToLongFunction<TimeUnit> elapsed = TimeService.elapsedWrapperFromNonMonotonicSource(TimeUnit.MICROSECONDS, this::now);
+            private long stamp = 0;
 
             @Override public Timeouts timeouts() { return null; }
             @Override public DurableBefore durableBefore() { return DurableBefore.EMPTY; }
@@ -353,6 +381,8 @@ public class AccordTestUtils
             @Override public long uniqueNow(long atLeast) { return now.getAsLong(); }
             @Override public long elapsed(TimeUnit timeUnit) { return elapsed.applyAsLong(timeUnit); }
             @Override public TopologyManager topology() { throw new UnsupportedOperationException(); }
+            @Override public long currentStamp() { return stamp; }
+            @Override public void updateStamp() {++stamp;}
         };
 
         AccordAgent agent = new AccordAgent();
@@ -374,26 +404,16 @@ public class AccordTestUtils
         return result;
     }
 
-    public static AccordCommandStore createAccordCommandStore(Node.Id node, LongSupplier now, Topology topology)
-    {
-        return createAccordCommandStore(node, now, topology, Stage.READ.executor(), Stage.MUTATION.executor());
-    }
-
     public static AccordCommandStore createAccordCommandStore(
-        LongSupplier now, String keyspace, String table, ExecutorPlus loadExecutor, ExecutorPlus saveExecutor)
+        LongSupplier now, String keyspace, String table)
     {
         TableMetadata metadata = Schema.instance.getTableMetadata(keyspace, table);
         TokenRange range = TokenRange.fullRange(metadata.id, metadata.partitioner);
         Node.Id node = new Id(1);
         Topology topology = new Topology(1, Shard.create(range, new SortedArrayList<>(new Id[] { node }), Sets.newHashSet(node), Collections.emptySet()));
-        AccordCommandStore store = createAccordCommandStore(node, now, topology, loadExecutor, saveExecutor);
-        store.execute(PreLoadContext.empty(), safeStore -> ((AccordCommandStore)safeStore.commandStore()).executor().cacheUnsafe().setCapacity(1 << 20));
+        AccordCommandStore store = createAccordCommandStore(node, now, topology);
+        store.execute((PreLoadContext.Empty)()->"Test", safeStore -> ((AccordCommandStore)safeStore.commandStore()).executor().cacheUnsafe().setCapacity(1 << 20));
         return store;
-    }
-
-    public static AccordCommandStore createAccordCommandStore(LongSupplier now, String keyspace, String table)
-    {
-        return createAccordCommandStore(now, keyspace, table, Stage.READ.executor(), Stage.MUTATION.executor());
     }
 
     public static void execute(AccordCommandStore commandStore, Runnable runnable)

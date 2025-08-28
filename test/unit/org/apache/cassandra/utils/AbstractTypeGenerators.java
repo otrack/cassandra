@@ -41,6 +41,7 @@ import java.util.stream.Stream;
 import javax.annotation.Nullable;
 
 import com.google.common.base.Preconditions;
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Maps;
@@ -87,7 +88,9 @@ import org.apache.cassandra.db.marshal.StringType;
 import org.apache.cassandra.db.marshal.TimeType;
 import org.apache.cassandra.db.marshal.TimeUUIDType;
 import org.apache.cassandra.db.marshal.TimestampType;
+import org.apache.cassandra.db.marshal.TokenUtf8Type;
 import org.apache.cassandra.db.marshal.TupleType;
+import org.apache.cassandra.db.marshal.TxnIdUtf8Type;
 import org.apache.cassandra.db.marshal.TypeParser;
 import org.apache.cassandra.db.marshal.UTF8Type;
 import org.apache.cassandra.db.marshal.UUIDType;
@@ -119,6 +122,8 @@ public final class AbstractTypeGenerators
                                                                                                 .put((Class<? extends AbstractType<?>>) (Class<? extends AbstractType>) ReversedType.class, "Implementation detail for cluster ordering... its expected the caller will unwrap the clustering type to always get access to the real type")
                                                                                                 .put(DynamicCompositeType.FixedValueComparator.class, "Hack type used for special ordering case, not a real/valid type")
                                                                                                 .put(FrozenType.class, "Fake class only used during parsing... the parsing creates this and the real type under it, then this gets swapped for the real type")
+                                                                                                .put(TxnIdUtf8Type.class, "Used only internally by accord debug virtual tables - could be tested, but class initialisation order prevents easy reuse of the relevant type generators")
+                                                                                                .put(TokenUtf8Type.class, "Used only internally by accord debug virtual tables - could be tested, but class initialisation order prevents easy reuse of the relevant type generators")
                                                                                                 .build();
 
     /**
@@ -134,7 +139,6 @@ public final class AbstractTypeGenerators
     {
         return (String a, String b) -> FastByteOperations.compareUnsigned(st.decompose(a), st.decompose(b));
     }
-
 
     private static final Map<AbstractType<?>, TypeSupport<?>> PRIMITIVE_TYPE_DATA_GENS =
     Stream.of(TypeSupport.of(BooleanType.instance, BOOLEAN_GEN),
@@ -184,6 +188,46 @@ public final class AbstractTypeGenerators
                                                                                               .add(DynamicCompositeType.class)
                                                                                               .add(CounterColumnType.class)
                                                                                               .build();
+    // NEVER EVER EVER UPDATE THIS LIST!
+    // meaningless emptyness is a legacy thrift concept, so only types from back then apply and all new types will never apply
+    private static final ImmutableList<AbstractType<?>> MEANINGLESS_EMPTYNESS = ImmutableList.of(
+    CounterColumnType.instance,
+
+    BooleanType.instance,
+
+    DateType.instance,
+    TimestampType.instance,
+
+    InetAddressType.instance,
+
+    TimeUUIDType.instance,
+    LegacyTimeUUIDType.instance,
+    LexicalUUIDType.instance,
+    UUIDType.instance,
+
+    DecimalType.instance,
+    DoubleType.instance,
+    FloatType.instance,
+    Int32Type.instance,
+    IntegerType.instance,
+    LongType.instance
+    );
+
+    public static Iterable<AbstractType<?>> meaninglessEmptyness()
+    {
+        return MEANINGLESS_EMPTYNESS;
+    }
+
+    public static boolean supportsMeaninglessEmptyness(AbstractType<?> type)
+    {
+        // Why list iteration rather than contains?  Because equality is hard... and some types like to do things like
+        // public boolean equals(Object obj) { return obj instanceof AbstractTimeUUIDType<?>; }
+        for (var t : meaninglessEmptyness())
+        {
+            if (t == type) return true;
+        }
+        return false;
+    }
 
     private AbstractTypeGenerators()
     {
@@ -413,6 +457,11 @@ public final class AbstractTypeGenerators
                 throw new IllegalArgumentException("Type " + instance + " is not a primitive type, or PRIMITIVE_TYPE_DATA_GENS needs to add support");
             primitiveGen = filter(primitiveGen, t -> t != instance);
             return this;
+        }
+
+        public TypeGenBuilder withoutUnsafeEquality()
+        {
+            return AbstractTypeGenerators.withoutUnsafeEquality(this);
         }
 
         @SuppressWarnings("unused")
@@ -1090,6 +1139,16 @@ public final class AbstractTypeGenerators
         else if (type instanceof CounterColumnType)
         {
             support = (TypeSupport<T>) TypeSupport.of(CounterColumnType.instance, SourceDSL.longs().all());
+        }
+        else if (type == DateType.instance)
+        {
+            // this type isn't supported in most places, but can still be supported here
+            support = (TypeSupport<T>) TypeSupport.of(DateType.instance, Generators.DATE_GEN);
+        }
+        else if (type == LegacyTimeUUIDType.instance)
+        {
+            // this type isn't supported in most places, but can still be supported here
+            support = (TypeSupport<T>) TypeSupport.of(LegacyTimeUUIDType.instance, Generators.UUID_TIME_GEN.mix(Generators.UUID_RANDOM_GEN));
         }
         else
         {

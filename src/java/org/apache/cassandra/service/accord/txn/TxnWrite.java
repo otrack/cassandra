@@ -27,13 +27,13 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.Executor;
 
-import com.google.common.collect.Iterables;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import accord.api.DataStore;
 import accord.api.Write;
+import accord.local.CommandStore;
 import accord.local.SafeCommandStore;
 import accord.primitives.PartialTxn;
 import accord.primitives.Routable.Domain;
@@ -45,7 +45,6 @@ import accord.primitives.TxnId;
 import accord.primitives.Writes;
 import accord.utils.async.AsyncChain;
 import accord.utils.async.AsyncChains;
-import org.apache.cassandra.concurrent.Stage;
 import org.apache.cassandra.cql3.UpdateParameters;
 import org.apache.cassandra.db.Clustering;
 import org.apache.cassandra.db.Columns;
@@ -62,6 +61,8 @@ import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputBuffer;
 import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.schema.ColumnMetadata;
+import org.apache.cassandra.service.accord.AccordCommandStore;
+import org.apache.cassandra.service.accord.AccordExecutor;
 import org.apache.cassandra.service.accord.api.PartitionKey;
 import org.apache.cassandra.service.accord.serializers.TableMetadatas;
 import org.apache.cassandra.service.accord.serializers.TableMetadatasAndKeys;
@@ -75,9 +76,12 @@ import static org.apache.cassandra.db.rows.DeserializationHelper.Flag.FROM_REMOT
 import static org.apache.cassandra.utils.ArraySerializers.deserializeArray;
 import static org.apache.cassandra.utils.ArraySerializers.serializeArray;
 import static org.apache.cassandra.utils.ArraySerializers.serializedArraySize;
+import static org.apache.cassandra.utils.ArraySerializers.skipArray;
 
 public class TxnWrite extends AbstractKeySorted<TxnWrite.Update> implements Write
 {
+    public static final long NO_TIMESTAMP = 0;
+
     @SuppressWarnings("unused")
     private static final Logger logger = LoggerFactory.getLogger(TxnWrite.class);
 
@@ -85,7 +89,7 @@ public class TxnWrite extends AbstractKeySorted<TxnWrite.Update> implements Writ
 
     private static final long EMPTY_SIZE = ObjectSizes.measure(EMPTY_CONDITION_FAILED);
 
-    public static class Update extends AbstractSerialized<PartitionUpdate, TableMetadatas>
+    public static class Update extends AbstractParameterisedVersionedSerialized<PartitionUpdate, TableMetadatas>
     {
         private static final long EMPTY_SIZE = ObjectSizes.measure(new Update(null, 0, ByteBufferUtil.EMPTY_BYTE_BUFFER));
         public final PartitionKey key;
@@ -135,13 +139,13 @@ public class TxnWrite extends AbstractKeySorted<TxnWrite.Update> implements Writ
                    '}';
         }
 
-        public AsyncChain<Void> write(TableMetadatas tables, boolean preserveTimestamps, long timestamp)
+        public AsyncChain<Void> write(Executor executor, TableMetadatas tables, boolean preserveTimestamps, long timestamp)
         {
             PartitionUpdate update = deserialize(tables);
             if (!preserveTimestamps)
                 update = new PartitionUpdate.Builder(update, 0).updateAllTimestamp(timestamp).build();
             Mutation mutation = new Mutation(update, PotentialTxnConflicts.ALLOW);
-            return AsyncChains.ofRunnable(Stage.MUTATION.executor(), mutation::applyUnsafe);
+            return AsyncChains.ofRunnable(executor, () -> mutation.apply(false, false));
         }
 
         @Override
@@ -214,6 +218,14 @@ public class TxnWrite extends AbstractKeySorted<TxnWrite.Update> implements Writ
             }
 
             @Override
+            public void skip(TableMetadatasAndKeys tablesAndKeys, DataInputPlus in, Version version) throws IOException
+            {
+                PartitionKey key = tablesAndKeys.deserializeKey(in);
+                int index = in.readInt();
+                ByteBufferUtil.skipWithVIntLength(in);
+            }
+
+            @Override
             public long serializedSize(Update write, TableMetadatasAndKeys tablesAndKeys, Version version)
             {
                 long size = 0;
@@ -234,13 +246,15 @@ public class TxnWrite extends AbstractKeySorted<TxnWrite.Update> implements Writ
         public final int index;
         public final PartitionUpdate baseUpdate;
         public final TxnReferenceOperations referenceOps;
+        public final long timestamp;
 
-        public Fragment(PartitionKey key, int index, PartitionUpdate baseUpdate, TxnReferenceOperations referenceOps)
+        public Fragment(PartitionKey key, int index, PartitionUpdate baseUpdate, TxnReferenceOperations referenceOps, long timestamp)
         {
             this.key = key;
             this.index = index;
             this.baseUpdate = baseUpdate;
             this.referenceOps = referenceOps;
+            this.timestamp = timestamp;
         }
 
         public static int compareKeys(Fragment left, Fragment right)
@@ -291,17 +305,20 @@ public class TxnWrite extends AbstractKeySorted<TxnWrite.Update> implements Writ
                                                                                 baseUpdate.rowCount(),
                                                                                 baseUpdate.canHaveShadowedData());
 
-            UpdateParameters up = parameters.updateParameters(baseUpdate.metadata(), key, index);
+            UpdateParameters up = parameters.updateParameters(baseUpdate.metadata(), key, index, timestamp);
             TxnData data = parameters.getData();
             Row staticRow = applyUpdates(baseUpdate.staticRow(), referenceOps.statics, key, Clustering.STATIC_CLUSTERING, up, data);
 
             if (!staticRow.isEmpty())
                 updateBuilder.add(staticRow);
 
-            Row existing = baseUpdate.hasRows() ? Iterables.getOnlyElement(baseUpdate) : null;
-            Row row = applyUpdates(existing, referenceOps.regulars, key, referenceOps.clustering, up, data);
-            if (row != null)
-                updateBuilder.add(row);
+            for (Clustering<?> clustering : referenceOps.clusterings)
+            {
+                Row existing = baseUpdate.hasRows() ? baseUpdate.getRow(clustering) : null;
+                Row row = applyUpdates(existing, referenceOps.regulars, key, clustering, up, data);
+                if (row != null)
+                    updateBuilder.add(row);
+            }
 
             return new Update(this.key, index, updateBuilder.build(), tables);
         }
@@ -360,6 +377,7 @@ public class TxnWrite extends AbstractKeySorted<TxnWrite.Update> implements Writ
                 out.writeUnsignedVInt32(fragment.index);
                 PartitionUpdate.serializer.serializeWithoutKey(fragment.baseUpdate, tables, out, version.messageVersion());
                 TxnReferenceOperations.serializer.serialize(fragment.referenceOps, tables, out, version);
+                out.writeUnsignedVInt(fragment.timestamp);
             }
 
             public Fragment deserialize(PartitionKey key, TableMetadatas tables, DataInputPlus in, Version version) throws IOException
@@ -368,7 +386,8 @@ public class TxnWrite extends AbstractKeySorted<TxnWrite.Update> implements Writ
                 // TODO (required): why FROM_REMOTE?
                 PartitionUpdate baseUpdate = PartitionUpdate.serializer.deserialize(key, tables, in, version.messageVersion(), FROM_REMOTE);
                 TxnReferenceOperations referenceOps = TxnReferenceOperations.serializer.deserialize(tables, in, version);
-                return new Fragment(key, idx, baseUpdate, referenceOps);
+                long timestamp = in.readUnsignedVInt();
+                return new Fragment(key, idx, baseUpdate, referenceOps, timestamp);
             }
 
             public long serializedSize(Fragment fragment, TableMetadatas tables, Version version)
@@ -377,6 +396,7 @@ public class TxnWrite extends AbstractKeySorted<TxnWrite.Update> implements Writ
                 size += TypeSizes.sizeofUnsignedVInt(fragment.index);
                 size += PartitionUpdate.serializer.serializedSizeWithoutKey(fragment.baseUpdate, tables, version.messageVersion());
                 size += TxnReferenceOperations.serializer.serializedSize(fragment.referenceOps, tables, version);
+                size += TypeSizes.sizeofUnsignedVInt(fragment.timestamp);
                 return size;
             }
         }
@@ -424,7 +444,13 @@ public class TxnWrite extends AbstractKeySorted<TxnWrite.Update> implements Writ
     }
 
     @Override
-    public AsyncChain<Void> apply(Seekable key, SafeCommandStore safeStore, TxnId txnId, Timestamp executeAt, DataStore store, PartialTxn txn)
+    public AsyncChain<Void> apply(SafeCommandStore safeStore, Seekable key, TxnId txnId, Timestamp executeAt, PartialTxn txn)
+    {
+        return applyDirect(safeStore.commandStore(), key, txnId, executeAt, txn);
+    }
+
+    @Override
+    public AsyncChain<Void> applyDirect(CommandStore commandStore, Seekable key, TxnId txnId, Timestamp executeAt, PartialTxn txn)
     {
         // UnrecoverableRepairUpdate will deserialize as null at other nodes
         // Accord should skip the Update for a read transaction, but handle it here anyways
@@ -438,15 +464,16 @@ public class TxnWrite extends AbstractKeySorted<TxnWrite.Update> implements Writ
         List<AsyncChain<Void>> results = new ArrayList<>();
         if (isConditionMet)
         {
-            boolean preserveTimestamps = txnUpdate.preserveTimestamps();
+            AccordExecutor executor = ((AccordCommandStore) commandStore).executor();
+            boolean preserveTimestamps = txnUpdate.preserveTimestamps().preserve;
             // Apply updates not specified fully by the client but built from fragments completed by data from reads.
             // This occurs, for example, when an UPDATE statement uses a value assigned by a LET statement.
-            forEachWithKey(key, write -> results.add(write.write(tables, preserveTimestamps, timestamp)));
+            forEachWithKey(key, write -> results.add(write.write(executor, tables, preserveTimestamps, timestamp)));
             // Apply updates that are fully specified by the client and not reliant on data from reads.
             // ex. INSERT INTO tbl (a, b, c) VALUES (1, 2, 3)
             // These updates are persisted only in TxnUpdate and not in TxnWrite to avoid duplication.
             List<Update> updates = txnUpdate.completeUpdatesForKey((RoutableKey) key);
-            updates.forEach(write -> results.add(write.write(tables, preserveTimestamps, timestamp)));
+            updates.forEach(write -> results.add(write.write(executor, tables, preserveTimestamps, timestamp)));
         }
 
         if (results.isEmpty())
@@ -482,6 +509,14 @@ public class TxnWrite extends AbstractKeySorted<TxnWrite.Update> implements Writ
             TableMetadatas tables = TableMetadatas.deserializeSelf(in);
             boolean isConditionMet = BooleanSerializer.serializer.deserialize(in);
             return new TxnWrite(tables, deserializeArray(new TableMetadatasAndKeys(tables, keys), in, version, Update.serializer, Update[]::new), isConditionMet);
+        }
+
+        @Override
+        public void skip(Seekables keys, DataInputPlus in, Version version) throws IOException
+        {
+            TableMetadatas tables = TableMetadatas.deserializeSelf(in);
+            BooleanSerializer.serializer.deserialize(in);
+            skipArray(new TableMetadatasAndKeys(tables, keys), in, version, Update.serializer);
         }
 
         @Override

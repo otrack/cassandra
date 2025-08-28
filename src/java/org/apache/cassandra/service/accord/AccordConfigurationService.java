@@ -23,6 +23,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BiConsumer;
 import java.util.stream.Collectors;
@@ -32,6 +33,7 @@ import javax.annotation.concurrent.GuardedBy;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.Sets;
 
+import accord.api.Agent;
 import accord.impl.AbstractConfigurationService;
 import accord.local.Node;
 import accord.primitives.Ranges;
@@ -55,12 +57,13 @@ import org.apache.cassandra.repair.SharedContext;
 import org.apache.cassandra.tcm.ClusterMetadata;
 import org.apache.cassandra.tcm.ClusterMetadataService;
 import org.apache.cassandra.tcm.Epoch;
-import org.apache.cassandra.tcm.listeners.ChangeListener;
 import org.apache.cassandra.tcm.membership.NodeState;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.Simulate;
 import org.apache.cassandra.utils.concurrent.AsyncPromise;
 import org.apache.cassandra.utils.concurrent.Future;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import static org.apache.cassandra.service.accord.AccordTopology.tcmIdToAccord;
 import static org.apache.cassandra.utils.Simulate.With.MONITORS;
@@ -69,6 +72,7 @@ import static org.apache.cassandra.utils.Simulate.With.MONITORS;
 @Simulate(with=MONITORS)
 public class AccordConfigurationService extends AbstractConfigurationService<AccordConfigurationService.EpochState, AccordConfigurationService.EpochHistory> implements AccordEndpointMapper, AccordSyncPropagator.Listener, Shutdownable
 {
+    public static final Logger logger = LoggerFactory.getLogger(AccordConfigurationService.class);
     private final AccordSyncPropagator syncPropagator;
     public final WatermarkCollector watermarkCollector;
 
@@ -127,28 +131,17 @@ public class AccordConfigurationService extends AbstractConfigurationService<Acc
         }
     }
 
-    //TODO (required): should not be public
-    public final ChangeListener listener = new MetadataChangeListener();
-    private class MetadataChangeListener implements ChangeListener
+    public AccordConfigurationService(Node.Id node, Agent agent, MessageDelivery messagingService, IFailureDetector failureDetector, ScheduledExecutorPlus scheduledTasks)
     {
-        @Override
-        public void notifyPostCommit(ClusterMetadata prev, ClusterMetadata next, boolean fromSnapshot)
-        {
-            maybeReportMetadata(next);
-        }
-    }
-
-    public AccordConfigurationService(Node.Id node, MessageDelivery messagingService, IFailureDetector failureDetector, ScheduledExecutorPlus scheduledTasks)
-    {
-        super(node);
+        super(node, agent);
         this.syncPropagator = new AccordSyncPropagator(localId, this, messagingService, failureDetector, scheduledTasks, this);
         this.watermarkCollector = new WatermarkCollector();
         listeners.add(watermarkCollector);
     }
 
-    public AccordConfigurationService(Node.Id node)
+    public AccordConfigurationService(Node.Id node, Agent agent)
     {
-        this(node, MessagingService.instance(), FailureDetector.instance, ScheduledExecutors.scheduledTasks);
+        this(node, agent, MessagingService.instance(), FailureDetector.instance, ScheduledExecutors.scheduledTasks);
     }
 
     @Override
@@ -182,7 +175,6 @@ public class AccordConfigurationService extends AbstractConfigurationService<Acc
     {
         if (isTerminated())
             return;
-        ClusterMetadataService.instance().log().removeListener(listener);
         state = State.SHUTDOWN;
     }
 
@@ -230,8 +222,11 @@ public class AccordConfigurationService extends AbstractConfigurationService<Acc
 
     void reportMetadataInternal(ClusterMetadata metadata)
     {
-        updateMapping(metadata);
         Topology topology = AccordTopology.createAccordTopology(metadata);
+        if (topology.isEmpty() && isEmpty())
+            return;
+
+        updateMapping(metadata);
         if (Invariants.isParanoid())
         {
             for (Node.Id node : topology.nodes())
@@ -252,7 +247,8 @@ public class AccordConfigurationService extends AbstractConfigurationService<Acc
 
     private void checkIfNodesRemoved(Topology topology, Set<Node.Id> stillLiveNodes)
     {
-        if (epochs.minEpoch() == topology.epoch()) return;
+        long minEpoch = epochs.minEpoch();
+        if (minEpoch == 0 || topology.epoch() <= minEpoch) return;
         Topology previous = getTopologyForEpoch(topology.epoch() - 1);
         // for all nodes removed, or pending removal, mark them as removed so we don't wait on their replies
         Set<Node.Id> removedNodes = Sets.difference(previous.nodes(), topology.nodes());
@@ -260,7 +256,7 @@ public class AccordConfigurationService extends AbstractConfigurationService<Acc
         // TODO (desired, efficiency): there should be no need to notify every epoch for every removed node
         for (Node.Id removedNode : removedNodes)
         {
-            if (topology.epoch() >= epochs.minEpoch())
+            if (topology.epoch() >= minEpoch)
                 onNodeRemoved(topology.epoch(), previous, removedNode);
         }
     }
@@ -307,6 +303,10 @@ public class AccordConfigurationService extends AbstractConfigurationService<Acc
         long epoch = metadata.epoch.getEpoch();
         synchronized (epochs)
         {
+            // Accord has never been enabled for this cluster.
+            if (epochs.isEmpty() && !metadata.schema.hasAccordKeyspaces())
+                return;
+
             // On first boot, we have 2 options:
             //
             //  - we can start listening to TCM _before_ we replay topologies
@@ -427,6 +427,12 @@ public class AccordConfigurationService extends AbstractConfigurationService<Acc
     }
 
     @Override
+    protected Executor executor()
+    {
+        return Stage.ACCORD_MIGRATION::execute;
+    }
+
+    @Override
     public void reportTopology(Topology topology, boolean isLoad, boolean startSync)
     {
         long tcmEpoch = ClusterMetadata.current().epoch.getEpoch();
@@ -440,13 +446,11 @@ public class AccordConfigurationService extends AbstractConfigurationService<Acc
     {
         long epoch = topology.epoch();
         EpochState epochState = getOrCreateEpochState(epoch);
-        if (!startSync || epochState.syncStatus != SyncStatus.NOT_STARTED)
-            return;
-
         synchronized (this)
         {
-            if (epochState.syncStatus != SyncStatus.NOT_STARTED)
+            if (!startSync || epochState.syncStatus != SyncStatus.NOT_STARTED)
                 return;
+
             epochState.setSyncStatus(SyncStatus.NOTIFYING);
         }
 
@@ -486,8 +490,7 @@ public class AccordConfigurationService extends AbstractConfigurationService<Acc
         if (epoch < minEpoch() || epochs.wasTruncated(epoch))
             return;
 
-        Topology topology = getTopologyForEpoch(epoch);
-        syncPropagator.reportClosed(epoch, topology.nodes(), ranges);
+        syncPropagator.reportClosed(epoch, mapping.nodes(), ranges);
     }
 
     @VisibleForTesting
@@ -499,10 +502,12 @@ public class AccordConfigurationService extends AbstractConfigurationService<Acc
     @Override
     public void reportEpochRetired(Ranges ranges, long epoch)
     {
+        if (epochs.wasTruncated(epoch))
+            return;
+
         checkStarted();
         // TODO (expected): ensure we aren't fetching a truncated epoch; otherwise this should be non-null
-        Topology topology = getTopologyForEpoch(epoch);
-        syncPropagator.reportRetired(epoch, topology.nodes(), ranges);
+        syncPropagator.reportRetired(epoch, mapping.nodes(), ranges);
     }
 
     @Override
@@ -520,6 +525,7 @@ public class AccordConfigurationService extends AbstractConfigurationService<Acc
     @Override
     public void reportEpochRemoved(long epoch)
     {
+        logger.info("Epoch removed, truncated epochs until {}", epoch);
         epochs.truncateUntil(epoch);
     }
     
@@ -635,7 +641,7 @@ public class AccordConfigurationService extends AbstractConfigurationService<Acc
     public Future<Void> unsafeLocalSyncNotified(long epoch)
     {
         AsyncPromise<Void> promise = new AsyncPromise<>();
-        getOrCreateEpochState(epoch).localSyncNotified().invoke((result, failure) -> {
+        getOrCreateEpochState(epoch).localSyncNotified().begin((result, failure) -> {
             if (failure != null) promise.tryFailure(failure);
             else promise.trySuccess(result);
         });

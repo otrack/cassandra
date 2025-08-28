@@ -199,6 +199,14 @@ if [ "x$CASSANDRA_HEAPDUMP_DIR" = "x" ]; then
 fi
 JVM_OPTS="$JVM_OPTS -XX:HeapDumpPath=$CASSANDRA_HEAPDUMP_DIR/cassandra-`date +%s`-pid$$.hprof"
 
+# Cassandra heap dump files management options:
+#  N >= 0 - keep N newest files
+# -1 - disable clean up
+# defaults to 2 if not set
+if [ "$CASSANDRA_HEAPDUMP_KEEP_NEWEST_N_FILES" = "" ]; then
+    CASSANDRA_HEAPDUMP_KEEP_NEWEST_N_FILES=2
+fi
+
 # stop the jvm on OutOfMemoryError as it can result in some data corruption
 # uncomment the preferred option
 # ExitOnOutOfMemoryError and CrashOnOutOfMemoryError require a JRE greater or equals to 1.7 update 101 or 1.8 update 92
@@ -283,8 +291,8 @@ configure_jmx()
 # We will be expecting the settings in jmx_server_options and jmx_encryption_options respectively instead.
 # The argument specifies the default port over which Cassandra will be available for JMX connections.
 #
-# If you comment out configure_jmx method call, then JMX_PORT variable will not be set, which means
-# nodetool which sources this file will not see it either and port from cassandra.yaml will be parsed instead,
+# If you comment out configure_jmx method call, then the port argument of configure_jmx function will not be used
+# when nodetool parses this file and port from cassandra.yaml will be parsed instead,
 # if not found there either, it defaults to 7199.
 #
 # For security reasons, you should not expose this port to the internet.  Firewall it if needed.

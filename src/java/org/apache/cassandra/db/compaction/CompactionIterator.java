@@ -40,9 +40,6 @@ import accord.local.DurableBefore;
 import accord.local.RedundantBefore;
 import accord.utils.Invariants;
 import accord.utils.UnhandledEnum;
-import accord.utils.btree.BTree;
-import accord.utils.btree.BulkIterator;
-import accord.utils.btree.UpdateFunction;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.ColumnIdentifier;
 import org.apache.cassandra.db.AbstractCompactionController;
@@ -105,10 +102,14 @@ import org.apache.cassandra.service.accord.journal.AccordTopologyUpdate;
 import org.apache.cassandra.service.accord.serializers.Version;
 import org.apache.cassandra.service.paxos.PaxosRepairHistory;
 import org.apache.cassandra.service.paxos.uncommitted.PaxosRows;
+import org.apache.cassandra.utils.BulkIterator;
 import org.apache.cassandra.utils.NoSpamLogger;
 import org.apache.cassandra.utils.NoSpamLogger.NoSpamLogStatement;
 import org.apache.cassandra.utils.TimeUUID;
+import org.apache.cassandra.utils.btree.BTree;
+import org.apache.cassandra.utils.btree.UpdateFunction;
 
+import static accord.local.Cleanup.ERASE;
 import static accord.local.Cleanup.Input.PARTIAL;
 import static accord.local.Cleanup.NO;
 import static com.google.common.base.Preconditions.checkState;
@@ -117,6 +118,7 @@ import static java.util.concurrent.TimeUnit.MINUTES;
 import static org.apache.cassandra.config.Config.PaxosStatePurging.legacy;
 import static org.apache.cassandra.config.DatabaseDescriptor.paxosStatePurging;
 import static org.apache.cassandra.service.accord.AccordKeyspace.CFKAccessor;
+import static org.apache.cassandra.service.accord.AccordKeyspace.JournalColumns.getJournalKey;
 
 /**
  * Merge multiple iterators over the content of sstable into a "compacted" iterator.
@@ -880,7 +882,7 @@ public class CompactionIterator extends CompactionInfo.Holder implements Unfilte
         @Override
         protected void beginPartition(UnfilteredRowIterator partition)
         {
-            key = AccordKeyspace.JournalColumns.getJournalKey(partition.partitionKey());
+            key = getJournalKey(partition.partitionKey());
             if (compactor == null || compactor.serializer != key.type.serializer)
             {
                 switch (key.type)
@@ -895,15 +897,12 @@ public class CompactionIterator extends CompactionInfo.Holder implements Unfilte
                         compactor = new AccordMergingCompactor(key.type.serializer, userVersion);
                 }
             }
-            compactor.reset(key);
+            compactor.reset(key, partition);
         }
 
         @Override
         protected UnfilteredRowIterator applyToPartition(UnfilteredRowIterator partition)
         {
-            if (!partition.hasNext())
-                return partition;
-
             try
             {
                 beginPartition(partition);
@@ -941,7 +940,7 @@ public class CompactionIterator extends CompactionInfo.Holder implements Unfilte
             this.serializer = serializer;
         }
 
-        abstract void reset(JournalKey key);
+        abstract void reset(JournalKey key, UnfilteredRowIterator partition);
         abstract void collect(JournalKey key, Row row, ByteBuffer bytes, Version userVersion) throws IOException;
         abstract UnfilteredRowIterator result(JournalKey journalKey, DecoratedKey partitionKey) throws IOException;
     }
@@ -962,7 +961,7 @@ public class CompactionIterator extends CompactionInfo.Holder implements Unfilte
         }
 
         @Override
-        void reset(JournalKey key)
+        void reset(JournalKey key, UnfilteredRowIterator partition)
         {
             builder.reset(key);
             lastDescriptor = -1;
@@ -1032,7 +1031,7 @@ public class CompactionIterator extends CompactionInfo.Holder implements Unfilte
         {
             row = null;
             modified = false;
-            builder.clear();
+            builder.reset();
         }
     }
 
@@ -1060,7 +1059,7 @@ public class CompactionIterator extends CompactionInfo.Holder implements Unfilte
         }
 
         @Override
-        void reset(JournalKey key)
+        void reset(JournalKey key, UnfilteredRowIterator partition)
         {
             mainBuilder.reset(key);
             reuseEntries.addAll(entries);
@@ -1103,7 +1102,7 @@ public class CompactionIterator extends CompactionInfo.Holder implements Unfilte
                     case EXPUNGE:
                         return null;
                     case ERASE:
-                        return PartitionUpdate.fullPartitionDelete(AccordKeyspace.Journal, partitionKey, Long.MAX_VALUE, nowInSec).unfilteredIterator();
+                        return erase(journalKey, partitionKey);
 
                     case TRUNCATE:
                     case TRUNCATE_WITH_OUTCOME:
@@ -1135,6 +1134,22 @@ public class CompactionIterator extends CompactionInfo.Holder implements Unfilte
                 }
             }
             return newVersion.build().unfilteredIterator();
+        }
+
+        private UnfilteredRowIterator erase(JournalKey journalKey, DecoratedKey partitionKey) throws IOException
+        {
+            AccordCommandRowEntry entry = entries.get(entries.size() - 1);
+            entry.builder.reset(journalKey);
+            entry.builder.addCleanup(false, ERASE);
+            return PartitionUpdate.singleRowUpdate(AccordKeyspace.Journal, partitionKey, toRow(entry)).unfilteredIterator();
+        }
+
+        private BTreeRow toRow(AccordCommandRowEntry entry) throws IOException
+        {
+            Object[] newRow = rowTemplate.clone();
+            newRow[0] = BufferCell.live(AccordKeyspace.JournalColumns.record, timestamp, entry.builder.asByteBuffer(userVersion));
+            newRow[1] = userVersionCell;
+            return BTreeRow.create(entry.row.clustering(), entry.row.primaryKeyLivenessInfo(), entry.row.deletion(), newRow);
         }
     }
 

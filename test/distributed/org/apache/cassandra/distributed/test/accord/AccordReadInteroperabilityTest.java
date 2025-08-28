@@ -141,7 +141,7 @@ public class AccordReadInteroperabilityTest extends AccordTestBase
             return;
         test("CREATE TABLE " + qualifiedAccordTableName + " (k int, c int, v int, PRIMARY KEY(k, c))" + (migrated ? " WITH " + transactionalMode.asCqlParam() : ""),
              cluster -> {
-                 SHARED_CLUSTER.setMessageSink(new MessageCountingSink(SHARED_CLUSTER));
+                 SHARED_CLUSTER.setMessageSink(new MessageCountingSink(SHARED_CLUSTER, MessageCountingSink.EXCLUDE_SYNC_POINT_MESSAGES));
                  if (!migrated)
                  {
                      String alterCQL = "ALTER TABLE " + qualifiedAccordTableName + " WITH " + transactionalMode.asCqlParam();
@@ -155,7 +155,7 @@ public class AccordReadInteroperabilityTest extends AccordTestBase
                      else
                      {
                          nodetool(cluster.coordinator(1), "repair", "-skip-paxos", "-skip-accord", KEYSPACE, accordTableName);
-                         nodetool(cluster.coordinator(1), "repair", "-skip-accord", KEYSPACE, accordTableName);
+                         nodetool(cluster.coordinator(1), "repair", "-full", "-skip-accord", KEYSPACE, accordTableName);
                      }
                  }
                  cluster.coordinator(1).execute(query, cl);
@@ -172,8 +172,7 @@ public class AccordReadInteroperabilityTest extends AccordTestBase
                      assertEquals(0, messageCount(Verb.ACCORD_INTEROP_STABLE_THEN_READ_REQ));
                      assertEquals(0, messageCount(Verb.ACCORD_INTEROP_READ_REQ));
                      assertEquals(0, messageCount(Verb.ACCORD_INTEROP_READ_RSP));
-                     // Durability scheduling creates a lot of background commits that generate read responses
-                     assertTrue(messageCount(Verb.ACCORD_READ_RSP) > 0);
+                     assertTrue(messageCount(Verb.ACCORD_GET_EPHMRL_READ_DEPS_REQ) > 0);
                  }
              });
     }

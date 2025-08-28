@@ -17,11 +17,8 @@
  */
 package org.apache.cassandra.service.accord;
 
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
 import accord.api.Agent;
@@ -32,12 +29,12 @@ import accord.api.ProgressLog;
 import accord.local.CommandStores;
 import accord.local.Node;
 import accord.local.NodeCommandStoreService;
+import accord.local.SequentialAsyncExecutor;
 import accord.local.ShardDistributor;
 import accord.primitives.Range;
 import accord.topology.Topology;
 import accord.utils.RandomSource;
 import org.apache.cassandra.cache.CacheSize;
-import org.apache.cassandra.concurrent.Stage;
 import org.apache.cassandra.config.AccordSpec.QueueShardModel;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.metrics.AccordCacheMetrics;
@@ -45,7 +42,6 @@ import org.apache.cassandra.metrics.CacheSizeMetrics;
 import org.apache.cassandra.schema.TableId;
 import org.apache.cassandra.service.accord.AccordExecutor.AccordExecutorFactory;
 import org.apache.cassandra.service.accord.api.TokenKey;
-import org.apache.cassandra.utils.concurrent.UncheckedInterruptedException;
 
 import static org.apache.cassandra.config.AccordSpec.QueueShardModel.THREAD_PER_SHARD;
 import static org.apache.cassandra.config.DatabaseDescriptor.getAccordQueueShardCount;
@@ -53,7 +49,6 @@ import static org.apache.cassandra.config.DatabaseDescriptor.getAccordQueueSubmi
 import static org.apache.cassandra.service.accord.AccordExecutor.Mode.RUN_WITHOUT_LOCK;
 import static org.apache.cassandra.service.accord.AccordExecutor.Mode.RUN_WITH_LOCK;
 import static org.apache.cassandra.service.accord.AccordExecutor.constant;
-import static org.apache.cassandra.service.accord.AccordExecutor.constantFactory;
 
 public class AccordCommandStores extends CommandStores implements CacheSize
 {
@@ -61,6 +56,7 @@ public class AccordCommandStores extends CommandStores implements CacheSize
 
     private final CacheSizeMetrics cacheSizeMetrics;
     private final AccordExecutor[] executors;
+    private final int mask;
 
     private long cacheSize, workingSetSize;
     private int maxQueuedLoads, maxQueuedRangeLoads;
@@ -74,6 +70,7 @@ public class AccordCommandStores extends CommandStores implements CacheSize
               AccordCommandStore.factory(id -> executors[id % executors.length]));
         this.executors = executors;
         this.cacheSizeMetrics = new CacheSizeMetrics(ACCORD_STATE_CACHE, this);
+        this.mask = Integer.highestOneBit(executors.length) - 1;
         cacheSize = DatabaseDescriptor.getAccordCacheSizeInMiB() << 20;
         workingSetSize = DatabaseDescriptor.getAccordWorkingSetSizeInMiB() << 20;
         maxQueuedLoads = DatabaseDescriptor.getAccordMaxQueuedLoadCount();
@@ -110,13 +107,10 @@ public class AccordCommandStores extends CommandStores implements CacheSize
                 {
                     case THREAD_PER_SHARD:
                     case THREAD_PER_SHARD_SYNC_QUEUE:
-                        executors[id] = factory.get(id, shardModel == THREAD_PER_SHARD ? RUN_WITHOUT_LOCK : RUN_WITH_LOCK, 1, constant(baseName + ']'), metrics, constantFactory(Stage.READ.executor()), constantFactory(Stage.MUTATION.executor()), constantFactory(Stage.READ.executor()), agent);
+                        executors[id] = factory.get(id, shardModel == THREAD_PER_SHARD ? RUN_WITHOUT_LOCK : RUN_WITH_LOCK, 1, constant(baseName + ']'), metrics, agent);
                         break;
                     case THREAD_POOL_PER_SHARD:
-                        executors[id] = factory.get(id, RUN_WITHOUT_LOCK, threads, num -> baseName + ',' + num + ']', metrics, AccordExecutor::submitIOToSelf, AccordExecutor::submitIOToSelf, AccordExecutor::submitIOToSelf, agent);
-                        break;
-                    case THREAD_POOL_PER_SHARD_EXCLUDES_IO:
-                        executors[id] = factory.get(id, RUN_WITHOUT_LOCK, threads, num -> baseName + ',' + num + ']', metrics, constantFactory(Stage.READ.executor()), constantFactory(Stage.MUTATION.executor()), constantFactory(Stage.READ.executor()), agent);
+                        executors[id] = factory.get(id, RUN_WITHOUT_LOCK, threads, num -> baseName + ',' + num + ']', metrics, agent);
                         break;
                 }
             }
@@ -132,6 +126,13 @@ public class AccordCommandStores extends CommandStores implements CacheSize
             return false;
         // we see new ranges when a new keyspace is added, so avoid bootstrap in these cases
         return contains(previous, ((TokenKey)  range.start()).table());
+    }
+
+    @Override
+    public SequentialAsyncExecutor someSequentialExecutor()
+    {
+        int idx = ((int) Thread.currentThread().getId()) & mask;
+        return executors[idx].newSequentialExecutor();
     }
 
     private static boolean contains(Topology previous, TableId searchTable)
@@ -219,32 +220,8 @@ public class AccordCommandStores extends CommandStores implements CacheSize
 
     public void waitForQuiescense()
     {
-        boolean hadPending;
-        try
-        {
-            do
-            {
-                hadPending = false;
-                List<Future<?>> futures = new ArrayList<>();
-                for (AccordExecutor executor : this.executors)
-                {
-                    hadPending |= executor.hasTasks();
-                    futures.add(executor.submit(() -> {}));
-                }
-                for (Future<?> future : futures)
-                    future.get();
-                futures.clear();
-            }
-            while (hadPending);
-        }
-        catch (ExecutionException e)
-        {
-            throw new IllegalStateException("Should have never been thrown", e);
-        }
-        catch (InterruptedException e)
-        {
-            throw new UncheckedInterruptedException(e);
-        }
+        for (AccordExecutor executor : this.executors)
+            executor.waitForQuiescence();
     }
 
     @Override

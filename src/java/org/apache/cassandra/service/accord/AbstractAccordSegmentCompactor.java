@@ -26,9 +26,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import accord.utils.Invariants;
-import accord.utils.btree.BTree;
-import accord.utils.btree.BulkIterator;
-import accord.utils.btree.UpdateFunction;
 import org.apache.cassandra.db.BufferClustering;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.DecoratedKey;
@@ -50,10 +47,13 @@ import org.apache.cassandra.journal.StaticSegment.KeyOrderReader;
 import org.apache.cassandra.service.ClientState;
 import org.apache.cassandra.service.accord.AccordJournalValueSerializers.FlyweightImage;
 import org.apache.cassandra.service.accord.AccordJournalValueSerializers.FlyweightSerializer;
+import org.apache.cassandra.utils.BulkIterator;
 import org.apache.cassandra.utils.NoSpamLogger;
 
 import static java.util.concurrent.TimeUnit.MINUTES;
 import org.apache.cassandra.service.accord.serializers.Version;
+import org.apache.cassandra.utils.btree.BTree;
+import org.apache.cassandra.utils.btree.UpdateFunction;
 
 /**
  * Segment compactor: takes static segments and compacts them into a single SSTable.
@@ -84,20 +84,26 @@ public abstract class AbstractAccordSegmentCompactor<V> implements SegmentCompac
         return false;
     }
 
-    abstract void initializeWriter();
+    abstract void initializeWriter(int estimatedKeyCount);
     abstract SSTableTxnWriter writer();
     abstract void finishAndAddWriter();
     abstract Throwable cleanupWriter(Throwable t);
 
+    // Only valid in the scope of a single `compact` call
+    private JournalKey prevKey;
+    private DecoratedKey prevDecoratedKey;
+
     @Override
     public Collection<StaticSegment<JournalKey, V>> compact(Collection<StaticSegment<JournalKey, V>> segments)
     {
-        Invariants.require(segments.size() >= 2, () -> String.format("Can only compact 2 or more segments, but got %d", segments.size()));
         logger.info("Compacting {} static segments: {}", segments.size(), segments);
 
+        // TODO (expected): this will be a large over-estimate. should make segments an sstable format and include cardinality estimation
+        int estimatedKeyCount = 0;
         PriorityQueue<KeyOrderReader<JournalKey>> readers = new PriorityQueue<>();
         for (StaticSegment<JournalKey, V> segment : segments)
         {
+            estimatedKeyCount += segment.entryCount();
             KeyOrderReader<JournalKey> reader = segment.keyOrderReader();
             if (reader.advance())
                 readers.add(reader);
@@ -110,7 +116,7 @@ public abstract class AbstractAccordSegmentCompactor<V> implements SegmentCompac
         if (readers.isEmpty())
             return Collections.emptyList();
 
-        initializeWriter();
+        initializeWriter(estimatedKeyCount);
 
         JournalKey key = null;
         FlyweightImage builder = null;
@@ -191,20 +197,22 @@ public abstract class AbstractAccordSegmentCompactor<V> implements SegmentCompac
             t = cleanupWriter(t);
             throw new RuntimeException(String.format("Caught exception while serializing. Last seen key: %s", key), t);
         }
+        finally
+        {
+            prevKey = null;
+            prevDecoratedKey = null;
+        }
 
         finishAndAddWriter();
         return Collections.emptyList();
     }
-
-    private JournalKey prevKey;
-    private DecoratedKey prevDecoratedKey;
 
     private void maybeWritePartition(JournalKey key, FlyweightImage builder, FlyweightSerializer<Object, FlyweightImage> serializer, long descriptor, int offset) throws IOException
     {
         if (builder != null)
         {
             DecoratedKey decoratedKey = AccordKeyspace.JournalColumns.decorate(key);
-            Invariants.requireArgument(prevKey == null || ((decoratedKey.compareTo(prevDecoratedKey) >= 0 ? 1 : -1) == (JournalKey.SUPPORT.compare(key, prevKey) >= 0 ? 1 : -1)),
+            Invariants.requireArgument(prevKey == null || normalize(decoratedKey.compareTo(prevDecoratedKey)) == normalize(JournalKey.SUPPORT.compare(key, prevKey)),
                                        "Partition key and JournalKey didn't have matching order, which may imply a serialization issue.\n%s (%s)\n%s (%s)",
                                        key, decoratedKey, prevKey, prevDecoratedKey);
             prevKey = key;
@@ -221,6 +229,15 @@ public abstract class AbstractAccordSegmentCompactor<V> implements SegmentCompac
             PartitionUpdate update = PartitionUpdate.singleRowUpdate(AccordKeyspace.Journal, decoratedKey, row);
             writer().append(update.unfilteredIterator());
         }
+    }
+
+    private static int normalize(int cmp)
+    {
+        if (cmp == 0)
+            return 0;
+        if (cmp < 0)
+            return -1;
+        return 1;
     }
 }
 

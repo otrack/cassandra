@@ -25,8 +25,14 @@ import java.nio.file.StandardOpenOption;
 import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
 import java.util.concurrent.atomic.AtomicLongFieldUpdater;
 import java.util.concurrent.locks.LockSupport;
+import java.util.function.Consumer;
 
+import accord.utils.Invariants;
 import com.codahale.metrics.Timer;
+import com.google.common.annotations.VisibleForTesting;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import org.apache.cassandra.db.TypeSizes;
 import org.apache.cassandra.utils.*;
 import org.apache.cassandra.utils.concurrent.OpOrder;
@@ -39,6 +45,8 @@ import static org.apache.cassandra.utils.Simulate.With.MONITORS;
 @Simulate(with=MONITORS)
 public final class ActiveSegment<K, V> extends Segment<K, V>
 {
+    private static final Logger logger = LoggerFactory.getLogger(ActiveSegment.class);
+
     final FileChannel channel;
 
     // OpOrder used to order appends wrt flush
@@ -93,7 +101,7 @@ public final class ActiveSegment<K, V> extends Segment<K, V>
     static <K, V> ActiveSegment<K, V> create(Descriptor descriptor, Params params, KeySupport<K> keySupport)
     {
         InMemoryIndex<K> index = InMemoryIndex.create(keySupport);
-        Metadata metadata = Metadata.create();
+        Metadata metadata = Metadata.empty();
         return new ActiveSegment<>(descriptor, params, index, metadata, keySupport);
     }
 
@@ -194,6 +202,7 @@ public final class ActiveSegment<K, V> extends Segment<K, V>
 
     private void discard()
     {
+        logger.debug("Discarding {}", this);
         selfRef.ensureReleased();
 
         descriptor.fileFor(Component.DATA).deleteIfExists();
@@ -341,7 +350,7 @@ public final class ActiveSegment<K, V> extends Segment<K, V>
                 if ((int)prev >= next)
                 {
                     // already stopped allocating, might also be closed
-                    assert buffer == null || prev == buffer.capacity() + 1;
+                    Invariants.require(buffer == null || prev == buffer.capacity() + 1);
                     return false;
                 }
 
@@ -350,6 +359,7 @@ public final class ActiveSegment<K, V> extends Segment<K, V>
                     // stopped allocating now; can only succeed once, no further allocation or discardUnusedTail can succeed
                     endOfBuffer = (int)prev;
                     assert buffer != null && next == buffer.capacity() + 1;
+                    metadata.fsyncLimit((int) prev);
                     return prev == 0;
                 }
                 LockSupport.parkNanos(1);
@@ -455,6 +465,21 @@ public final class ActiveSegment<K, V> extends Segment<K, V>
                 appendOp.close();
             }
         }
+
+        // TODO (required): Find a better way to test unwritten allocations and/or corruption
+        @VisibleForTesting
+        void consumeBufferUnsafe(Consumer<ByteBuffer> fn)
+        {
+            try
+            {
+                fn.accept(buffer);
+            }
+            finally
+            {
+                appendOp.close();
+            }
+        }
+
 
         // Variant of write that does not allocate/return a record pointer
         void writeInternal(K id, ByteBuffer record)

@@ -19,15 +19,25 @@ package org.apache.cassandra.service.accord;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.Deque;
 import java.util.Iterator;
+import java.util.List;
 import java.util.NavigableMap;
+import java.util.Queue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Consumer;
+import java.util.function.Supplier;
 import javax.annotation.Nullable;
 
 import com.google.common.annotations.VisibleForTesting;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import accord.impl.CommandChange;
 import accord.impl.CommandChange.Field;
@@ -40,7 +50,10 @@ import accord.local.DurableBefore;
 import accord.local.Node;
 import accord.local.RedundantBefore;
 import accord.primitives.EpochSupplier;
+import accord.primitives.PartialDeps;
+import accord.primitives.PartialTxn;
 import accord.primitives.Ranges;
+import accord.primitives.Route;
 import accord.primitives.SaveStatus;
 import accord.primitives.Status.Durability;
 import accord.primitives.Timestamp;
@@ -48,17 +61,20 @@ import accord.primitives.TxnId;
 import accord.utils.Invariants;
 import accord.utils.PersistentField;
 import accord.utils.UnhandledEnum;
-import accord.utils.async.AsyncChains;
 import accord.utils.async.AsyncResult;
 import accord.utils.async.AsyncResults;
+import org.agrona.collections.Int2ObjectHashMap;
+import org.agrona.collections.IntArrayList;
 import org.apache.cassandra.concurrent.Shutdownable;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.Keyspace;
+import org.apache.cassandra.io.util.DataInputBuffer;
 import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputBuffer;
 import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.io.util.File;
+import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.journal.Compactor;
 import org.apache.cassandra.journal.Journal;
 import org.apache.cassandra.journal.Params;
@@ -76,9 +92,14 @@ import org.apache.cassandra.service.accord.serializers.DepsSerializers;
 import org.apache.cassandra.service.accord.serializers.ResultSerializers;
 import org.apache.cassandra.service.accord.serializers.Version;
 import org.apache.cassandra.service.accord.serializers.WaitingOnSerializer;
+import org.apache.cassandra.utils.Closeable;
 import org.apache.cassandra.utils.CloseableIterator;
 import org.apache.cassandra.utils.ExecutorUtils;
+import org.apache.cassandra.utils.concurrent.Semaphore;
 
+import static accord.api.Journal.Load.ALL;
+import static accord.api.Journal.Load.MINIMAL;
+import static accord.api.Journal.Load.MINIMAL_WITH_DEPS;
 import static accord.impl.CommandChange.Field.CLEANUP;
 import static accord.impl.CommandChange.anyFieldChanged;
 import static accord.impl.CommandChange.describeFlags;
@@ -92,9 +113,12 @@ import static accord.impl.CommandChange.unsetIterable;
 import static accord.impl.CommandChange.validateFlags;
 import static accord.local.Cleanup.Input.FULL;
 import static org.apache.cassandra.service.accord.AccordJournalValueSerializers.DurableBeforeAccumulator;
+import static org.apache.cassandra.service.accord.JournalKey.Type.COMMAND_DIFF;
+import static org.apache.cassandra.utils.FBUtilities.getAvailableProcessors;
 
 public class AccordJournal implements accord.api.Journal, RangeSearcher.Supplier, Shutdownable
 {
+    private static final Logger logger = LoggerFactory.getLogger(AccordJournal.class);
     static final ThreadLocal<byte[]> keyCRCBytes = ThreadLocal.withInitial(() -> new byte[JournalKeySupport.TOTAL_SIZE]);
 
     @VisibleForTesting
@@ -227,10 +251,42 @@ public class AccordJournal implements accord.api.Journal, RangeSearcher.Supplier
         return builder.construct(redundantBefore);
     }
 
-    @Override
-    public Command.Minimal loadMinimal(int commandStoreId, TxnId txnId, Load load, RedundantBefore redundantBefore, DurableBefore durableBefore)
+    public static class DebugEntry implements Supplier<CommandChange.Builder>
     {
-        Builder builder = loadDiffs(commandStoreId, txnId, load);
+        public final long segment;
+        public final int position;
+        public final Builder builder;
+
+        public DebugEntry(long segment, int position, Builder builder)
+        {
+            this.segment = segment;
+            this.position = position;
+            this.builder = builder;
+        }
+
+        @Override
+        public CommandChange.Builder get()
+        {
+            return builder;
+        }
+    }
+
+    @Override
+    public List<DebugEntry> debugCommand(int commandStoreId, TxnId txnId)
+    {
+        JournalKey key = new JournalKey(txnId, COMMAND_DIFF, commandStoreId);
+        List<DebugEntry> result = new ArrayList<>();
+        journalTable.readAll(key, (long segment, int position, JournalKey k, ByteBuffer buffer, int userVersion) -> {
+            Builder builder = new Builder(txnId);
+            new AccordJournalTable.RecordConsumerAdapter<>(builder::deserializeNext).accept(segment, position, k, buffer, userVersion);
+            result.add(new DebugEntry(segment, position, builder));
+        });
+        return result;
+    }
+
+    // applies cleanup and returns null if no command should be returned
+    public static Builder cleanupAndFilter(Builder builder, RedundantBefore redundantBefore, DurableBefore durableBefore)
+    {
         if (builder.isEmpty())
             return null;
 
@@ -243,7 +299,21 @@ public class AccordJournal implements accord.api.Journal, RangeSearcher.Supplier
                 return null;
         }
         Invariants.require(builder.saveStatus() != null, "No saveSatus loaded, but next was called and cleanup was not: %s", builder);
-        return builder.asMinimal();
+        return builder;
+    }
+
+    @Override
+    public Command.Minimal loadMinimal(int commandStoreId, TxnId txnId, RedundantBefore redundantBefore, DurableBefore durableBefore)
+    {
+        Builder builder = cleanupAndFilter(loadDiffs(commandStoreId, txnId, MINIMAL), redundantBefore, durableBefore);
+        return builder == null ? null : builder.asMinimal();
+    }
+
+    @Override
+    public Command.MinimalWithDeps loadMinimalWithDeps(int commandStoreId, TxnId txnId, RedundantBefore redundantBefore, DurableBefore durableBefore)
+    {
+        Builder builder = cleanupAndFilter(loadDiffs(commandStoreId, txnId, MINIMAL_WITH_DEPS), redundantBefore, durableBefore);
+        return builder == null ? null : builder.asMinimalWithDeps();
     }
 
     @Override
@@ -285,7 +355,7 @@ public class AccordJournal implements accord.api.Journal, RangeSearcher.Supplier
             return;
         }
 
-        JournalKey key = new JournalKey(update.txnId, JournalKey.Type.COMMAND_DIFF, commandStoreId);
+        JournalKey key = new JournalKey(update.txnId, COMMAND_DIFF, commandStoreId);
         RecordPointer pointer = journal.asyncWrite(key, diff);
         if (journalTable.shouldIndex(key)
             && diff.hasParticipants()
@@ -293,6 +363,17 @@ public class AccordJournal implements accord.api.Journal, RangeSearcher.Supplier
             journal.onDurable(pointer, () ->
                                        journalTable.safeNotify(index ->
                                                                index.update(pointer.segment, key.commandStoreId, key.id, diff.after.route())));
+        if (onFlush != null)
+            journal.onDurable(pointer, onFlush);
+    }
+
+    public void patchCommand(int commandStoreId, TxnId txnId, Cleanup cleanup, @Nullable Runnable onFlush)
+    {
+        Builder change = new Builder(txnId);
+        change.maybeCleanup(false, cleanup);
+
+        JournalKey key = new JournalKey(txnId, JournalKey.Type.COMMAND_DIFF, commandStoreId);
+        RecordPointer pointer = journal.asyncWrite(key, (out, userVersion) -> change.serialize(out, Version.fromVersion(configuration().userVersion())));
         if (onFlush != null)
             journal.onDurable(pointer, onFlush);
     }
@@ -313,17 +394,18 @@ public class AccordJournal implements accord.api.Journal, RangeSearcher.Supplier
             journal.onDurable(pointer, onFlush);
     }
 
+    private static final JournalKey DURABLE_BEFORE_KEY = new JournalKey(TxnId.NONE, JournalKey.Type.DURABLE_BEFORE, 0);
+
     @Override
     public PersistentField.Persister<DurableBefore, DurableBefore> durableBeforePersister()
     {
         return new PersistentField.Persister<>()
         {
             @Override
-            public AsyncResult<?> persist(DurableBefore addDurableBefore, DurableBefore newDurableBefore)
+            public AsyncResult<?> persist(DurableBefore addValue, DurableBefore newValue)
             {
                 AsyncResult.Settable<Void> result = AsyncResults.settable();
-                JournalKey key = new JournalKey(TxnId.NONE, JournalKey.Type.DURABLE_BEFORE, 0);
-                RecordPointer pointer = appendInternal(key, addDurableBefore);
+                RecordPointer pointer = appendInternal(DURABLE_BEFORE_KEY, addValue);
                 // TODO (required): what happens on failure?
                 journal.onDurable(pointer, () -> result.setSuccess(null));
                 return result;
@@ -332,7 +414,7 @@ public class AccordJournal implements accord.api.Journal, RangeSearcher.Supplier
             @Override
             public DurableBefore load()
             {
-                DurableBeforeAccumulator accumulator = readAll(new JournalKey(TxnId.NONE, JournalKey.Type.DURABLE_BEFORE, 0));
+                DurableBeforeAccumulator accumulator = readAll(DURABLE_BEFORE_KEY);
                 return accumulator.get();
             }
         };
@@ -363,7 +445,7 @@ public class AccordJournal implements accord.api.Journal, RangeSearcher.Supplier
 
     private Builder loadDiffs(int commandStoreId, TxnId txnId, Load load)
     {
-        JournalKey key = new JournalKey(txnId, JournalKey.Type.COMMAND_DIFF, commandStoreId);
+        JournalKey key = new JournalKey(txnId, COMMAND_DIFF, commandStoreId);
         Builder builder = new Builder(txnId, load);
         journalTable.readAll(key, builder::deserializeNext);
         return builder;
@@ -375,7 +457,7 @@ public class AccordJournal implements accord.api.Journal, RangeSearcher.Supplier
         return loadDiffs(commandStoreId, txnId, Load.ALL);
     }
 
-    private <BUILDER extends FlyweightImage> BUILDER readAll(JournalKey key)
+    public <BUILDER extends FlyweightImage> BUILDER readAll(JournalKey key)
     {
         BUILDER builder = (BUILDER) key.type.serializer.mergerFor();
         // TODO (expected): this can be further improved to avoid allocating lambdas
@@ -383,6 +465,11 @@ public class AccordJournal implements accord.api.Journal, RangeSearcher.Supplier
         // TODO (expected): for those where we store an image, read only the first entry we find in DESC order
         journalTable.readAll(key, (in, userVersion) -> serializer.deserialize(key, builder, in, userVersion));
         return builder;
+    }
+
+    public void forEachEntry(JournalKey key, AccordJournalTable.Reader reader)
+    {
+        journalTable.readAll(key, reader);
     }
 
     private <T> RecordPointer appendInternal(JournalKey key, T write)
@@ -431,39 +518,223 @@ public class AccordJournal implements accord.api.Journal, RangeSearcher.Supplier
         journalTable.forceCompaction();
     }
 
-    @SuppressWarnings("unchecked") @Override
-    public void replay(CommandStores commandStores)
+    public void forEach(Consumer<JournalKey> consumer)
     {
-        try (CloseableIterator<Journal.KeyRefs<JournalKey>> iter = journalTable.keyIterator())
+        try (CloseableIterator<Journal.KeyRefs<JournalKey>> iter = journalTable.keyIterator(null, null))
         {
             while (iter.hasNext())
             {
                 Journal.KeyRefs<JournalKey> ref = iter.next();
+                consumer.accept(ref.key());
+            }
+        }
+    }
 
-                if (ref.key().type != JournalKey.Type.COMMAND_DIFF)
-                    continue;
+    @SuppressWarnings("unchecked")
+    @Override
+    public void replay(CommandStores commandStores)
+    {
+        // TODO (expected): make the parallelisms configurable
+        // Replay is performed in parallel, where at most X commands can be in flight, accross at most Y commands stores.
+        // That is, you can limit replay parallelism to 1 command store at a time, but load multiple commands within that data store,
+        // _or_ have multiple commands being loaded accross multiple data stores.
+        final Semaphore commandParallelism = Semaphore.newSemaphore(getAvailableProcessors());
+        final int commandStoreParallelism = Math.max(Math.max(1, Math.min(getAvailableProcessors(), 4)), getAvailableProcessors() / 4);
+        final AtomicBoolean abort = new AtomicBoolean();
+        // TODO (expected): balance work submission by AccordExecutor
+        final IntArrayList activeCommandStoreIds = new IntArrayList();
+        final ReplayQueue pendingCommandStores = new ReplayQueue(commandStores.all());
 
-                CommandStore commandStore = commandStores.forId(ref.key().commandStoreId);
-                Loader loader = commandStore.loader();
-                AsyncChains.getUnchecked(loader.load(ref.key().id)
-                                               .map(command -> {
-                                                   if (journalTable.shouldIndex(ref.key())
-                                                       && command.participants() != null
-                                                       && command.participants().route() != null)
-                                                   {
-                                                       ref.segments(segment -> {
-                                                           journalTable.safeNotify(index -> index.update(segment, ref.key().commandStoreId, ref.key().id, command.participants().route()));
-                                                       });
-                                                   }
-                                                   return command;
-                                               })
-                                               .beginAsResult());
+        class ReplayStream implements Closeable
+        {
+            final CommandStore commandStore;
+            final Replayer replayer;
+            final CloseableIterator<Journal.KeyRefs<JournalKey>> iter;
+            JournalKey prev;
+
+            public ReplayStream(CommandStore commandStore)
+            {
+                this.commandStore = commandStore;
+                this.replayer = commandStore.replayer();
+                // Keys in the index are sorted by command store id, so index iteration will be sequential
+                this.iter = journalTable.keyIterator(new JournalKey(TxnId.NONE, COMMAND_DIFF, commandStore.id()), new JournalKey(TxnId.MAX.withoutNonIdentityFlags(), COMMAND_DIFF, commandStore.id()));
+            }
+
+            boolean replay()
+            {
+                JournalKey key;
+                long[] segments;
+                while (true)
+                {
+                    if (!iter.hasNext())
+                    {
+                        logger.info("Completed replay of {}", commandStore);
+                        return false;
+                    }
+
+                    Journal.KeyRefs<JournalKey> ref = iter.next();
+                    if (ref.key().type != COMMAND_DIFF)
+                        continue;
+
+                    key = ref.key();
+                    segments = journalTable.shouldIndex(key) ? ref.copyOfSegments() : null;
+                    break;
+                }
+
+                TxnId txnId = key.id;
+                Invariants.require(prev == null ||
+                                   key.commandStoreId != prev.commandStoreId ||
+                                   key.id.compareTo(prev.id) != 0,
+                                   "duplicate key detected %s == %s", key, prev);
+                prev = key;
+                commandParallelism.acquireThrowUncheckedOnInterrupt(1);
+                replayer.replay(txnId)
+                        .map(route -> {
+                          if (segments != null && route != null)
+                          {
+                              for (long segment : segments)
+                                  journalTable.safeNotify(index -> index.update(segment, key.commandStoreId, txnId, (Route)route));
+                          }
+                          return null;
+                      }).begin((success, fail) -> {
+                          commandParallelism.release(1);
+                          if (fail != null && !journal.handleError("Could not replay command " + txnId, fail))
+                              abort.set(true);
+                      });
+
+                return true;
+            }
+
+            @Override
+            public void close()
+            {
+                iter.close();
+            }
+        }
+
+        // Replay streams by command store id, can hold at most commandStoreParallelism items
+        final Int2ObjectHashMap<ReplayStream> replayStreams = new Int2ObjectHashMap<>();
+        try
+        {
+            // index of the store we're currently pulling from in the activeCommandStoreIds collection
+            int cur = 0;
+            while (!abort.get())
+            {
+                if (cur == activeCommandStoreIds.size())
+                {
+                    if (activeCommandStoreIds.size() < commandStoreParallelism && !pendingCommandStores.isEmpty())
+                    {
+                        CommandStore next = pendingCommandStores.next();
+                        int id = next.id();
+                        activeCommandStoreIds.add(id);
+                        replayStreams.put(id, new ReplayStream(next));
+                    }
+                    else if (activeCommandStoreIds.isEmpty()) break;
+                    else cur = 0;
+                }
+
+                int id = activeCommandStoreIds.get(cur);
+                ReplayStream replayStream = replayStreams.get(id);
+                while (!replayStream.replay())
+                {
+                    // Replay complete for this command store; close and replace
+                    replayStreams.remove(id).close();
+                    if (pendingCommandStores.isEmpty())
+                    {
+                        // no more pending to submit; remove and continue with the next remaining (if any)
+                        activeCommandStoreIds.removeAt(cur);
+                        if (cur == activeCommandStoreIds.size())
+                            --cur;
+                        if (cur < 0)
+                            break;
+                        id = activeCommandStoreIds.get(cur);
+                    }
+                    else
+                    {
+                        // replace it with a pending command store, and continue processing
+                        CommandStore next = pendingCommandStores.next(streamId(replayStream.commandStore));
+                        id = next.id();
+                        activeCommandStoreIds.set(cur, id);
+                        replayStreams.put(id, new ReplayStream(next));
+                    }
+
+                    replayStream = replayStreams.get(id);
+                }
+
+                ++cur;
             }
         }
         catch (Throwable t)
         {
-            throw new RuntimeException("Can not replay journal.", t);
+            try { FileUtils.close(replayStreams.values()); }
+            catch (Throwable t2) { t.addSuppressed(t2); }
+            throw t;
         }
+    }
+
+    static class ReplayQueue
+    {
+        final Int2ObjectHashMap<Queue<CommandStore>> byExecutor = new Int2ObjectHashMap<>();
+        final Deque<Integer> nextId = new ArrayDeque<>();
+
+        ReplayQueue(CommandStore[] commandStores)
+        {
+            for (CommandStore commandStore : commandStores)
+            {
+                byExecutor.computeIfAbsent(streamId(commandStore), ignore -> new ArrayDeque<>())
+                          .add(commandStore);
+            }
+            nextId.addAll(byExecutor.keySet());
+        }
+
+        boolean isEmpty()
+        {
+            return byExecutor.isEmpty();
+        }
+
+        CommandStore next()
+        {
+            while (true)
+            {
+                if (byExecutor.isEmpty())
+                    return null;
+
+                Integer id = nextId.poll();
+                if (id == null)
+                {
+                    nextId.addAll(byExecutor.keySet());
+                    id = nextId.poll();
+                }
+
+                Queue<CommandStore> queue = byExecutor.get(id);
+                if (queue != null)
+                {
+                    CommandStore next = queue.poll();
+                    if (queue.isEmpty())
+                        byExecutor.remove(id);
+                    if (next != null)
+                        return next;
+                }
+            }
+        }
+
+        CommandStore next(int streamId)
+        {
+            Queue<CommandStore> queue = byExecutor.get(streamId);
+            if (queue == null)
+                return next();
+
+            CommandStore next = queue.poll();
+            if (queue.isEmpty())
+                byExecutor.remove(streamId);
+
+            return next;
+        }
+    }
+
+    private static int streamId(CommandStore commandStore)
+    {
+        return commandStore instanceof AccordCommandStore ? ((AccordCommandStore) commandStore).executor().executorId() : 1;
     }
 
     public static @Nullable ByteBuffer asSerializedChange(Command before, Command after, Version userVersion) throws IOException
@@ -483,6 +754,12 @@ public class AccordJournal implements accord.api.Journal, RangeSearcher.Supplier
     public void unsafeSetStarted()
     {
         status = Status.STARTED;
+    }
+
+    @VisibleForTesting
+    public Journal<JournalKey, Object> unsafeGetJournal()
+    {
+        return journal;
     }
 
     @Override
@@ -551,13 +828,14 @@ public class AccordJournal implements accord.api.Journal, RangeSearcher.Supplier
                         ExecuteAtSerializer.serialize(command.executesAtLeast(), out);
                         break;
                     case MIN_UNIQUE_HLC:
+                        Invariants.require(command.waitingOn().minUniqueHlc() != 0);
                         out.writeUnsignedVInt(command.waitingOn().minUniqueHlc());
                         break;
                     case SAVE_STATUS:
                         out.writeByte(command.saveStatus().ordinal());
                         break;
                     case DURABILITY:
-                        out.writeByte(command.durability().ordinal());
+                        out.writeByte(command.durability().encoded());
                         break;
                     case ACCEPTED:
                         CommandSerializers.ballot.serialize(command.acceptedOrCommitted(), out);
@@ -572,7 +850,7 @@ public class AccordJournal implements accord.api.Journal, RangeSearcher.Supplier
                         CommandSerializers.partialTxn.serialize(command.partialTxn(), out, userVersion);
                         break;
                     case PARTIAL_DEPS:
-                        DepsSerializers.partialDeps.serialize(command.partialDeps(), out);
+                        DepsSerializers.partialDepsById.serialize(command.partialDeps(), out);
                         break;
                     case WAITING_ON:
                         Command.WaitingOn waitingOn = command.waitingOn();
@@ -585,7 +863,15 @@ public class AccordJournal implements accord.api.Journal, RangeSearcher.Supplier
                         ResultSerializers.result.serialize(command.result(), out);
                         break;
                     case CLEANUP:
-                        throw new IllegalStateException();
+                        Cleanup cleanup;
+                        switch (command.saveStatus())
+                        {
+                            default: throw new UnhandledEnum(command.saveStatus());
+                            case Erased: cleanup = Cleanup.ERASE; break;
+                            case Invalidated: cleanup = Cleanup.INVALIDATE; break;
+                        }
+                        out.writeByte(cleanup.ordinal());
+                        break;
                 }
 
                 iterable = unsetIterable(field, iterable);
@@ -611,6 +897,8 @@ public class AccordJournal implements accord.api.Journal, RangeSearcher.Supplier
 
     public static class Builder extends CommandChange.Builder implements FlyweightImage
     {
+        private final boolean deserializeDeps;
+
         public Builder()
         {
             this(Load.ALL);
@@ -618,17 +906,35 @@ public class AccordJournal implements accord.api.Journal, RangeSearcher.Supplier
 
         public Builder(Load load)
         {
-            super(null, load);
+            this(null, load);
         }
 
         public Builder(TxnId txnId)
         {
-            super(txnId, Load.ALL);
+            this(txnId, Load.ALL);
         }
 
         public Builder(TxnId txnId, Load load)
         {
             super(txnId, load);
+            deserializeDeps = load == ALL;
+        }
+
+        @Override
+        public PartialDeps partialDeps()
+        {
+            if (partialDeps instanceof ByteBuffer)
+            {
+                try
+                {
+                    partialDeps = DepsSerializers.partialDepsById.deserialize((ByteBuffer) partialDeps);
+                }
+                catch (IOException e)
+                {
+                    throw new IllegalStateException("Failed to materialise partially deserialised deps", e);
+                }
+            }
+            return (PartialDeps) partialDeps;
         }
 
         public void reset(JournalKey key)
@@ -669,8 +975,8 @@ public class AccordJournal implements accord.api.Journal, RangeSearcher.Supplier
                         out.writeByte(cleanup.ordinal());
                         break;
                     case EXECUTE_AT:
-                        Invariants.require(txnId != null);
-                        Invariants.require(executeAt != null);
+                        Invariants.require(txnId != null, "%s", this);
+                        Invariants.require(executeAt != null, "%s", this);
                         ExecuteAtSerializer.serialize(txnId, executeAt, out);
                         break;
                     case EXECUTES_AT_LEAST:
@@ -678,47 +984,49 @@ public class AccordJournal implements accord.api.Journal, RangeSearcher.Supplier
                         ExecuteAtSerializer.serialize(executesAtLeast, out);
                         break;
                     case MIN_UNIQUE_HLC:
-                        Invariants.require(minUniqueHlc != 0);
+                        Invariants.require(minUniqueHlc != 0, "%s", this);
                         out.writeUnsignedVInt(minUniqueHlc);
                         break;
                     case SAVE_STATUS:
-                        Invariants.require(saveStatus != null);
+                        Invariants.require(saveStatus != null, "%s", this);
                         out.writeByte(saveStatus.ordinal());
                         break;
                     case DURABILITY:
-                        Invariants.require(durability != null);
-                        out.writeByte(durability.ordinal());
+                        Invariants.require(durability != null, "%s", this);
+                        out.writeByte(durability.encoded());
                         break;
                     case ACCEPTED:
-                        Invariants.require(acceptedOrCommitted != null);
+                        Invariants.require(acceptedOrCommitted != null, "%s", this);
                         CommandSerializers.ballot.serialize(acceptedOrCommitted, out);
                         break;
                     case PROMISED:
-                        Invariants.require(promised != null);
+                        Invariants.require(promised != null, "%s", this);
                         CommandSerializers.ballot.serialize(promised, out);
                         break;
                     case PARTICIPANTS:
-                        Invariants.require(participants != null);
+                        Invariants.require(participants != null, "%s", this);
                         CommandSerializers.participants.serialize(participants, out);
                         break;
                     case PARTIAL_TXN:
-                        Invariants.require(partialTxn != null);
-                        CommandSerializers.partialTxn.serialize(partialTxn, out, userVersion);
+                        Invariants.require(partialTxn != null, "%s", this);
+                        if (partialTxn instanceof ByteBuffer) out.write(((ByteBuffer) partialTxn).duplicate());
+                        else CommandSerializers.partialTxn.serialize((PartialTxn) partialTxn, out, userVersion);
                         break;
                     case PARTIAL_DEPS:
-                        Invariants.require(partialDeps != null);
-                        DepsSerializers.partialDeps.serialize(partialDeps, out);
+                        Invariants.require(partialDeps != null, "%s", this);
+                        if (partialDeps instanceof ByteBuffer) out.write(((ByteBuffer) partialDeps).duplicate());
+                        else DepsSerializers.partialDepsById.serialize((PartialDeps) partialDeps, out);
                         break;
                     case WAITING_ON:
-                        Invariants.require(waitingOn != null);
-                        ((WaitingOnSerializer.Provider)waitingOn).reserialize(out);
+                        Invariants.require(waitingOn != null, "%s", this);
+                        ((WaitingOnSerializer.WaitingOnBitSetsAndLength)waitingOn).reserialize(out);
                         break;
                     case WRITES:
-                        Invariants.require(writes != null);
+                        Invariants.require(writes != null, "%s", this);
                         CommandSerializers.writes.serialize(writes, out, userVersion);
                         break;
                     case RESULT:
-                        Invariants.require(result != null);
+                        Invariants.require(result != null, "%s", this);
                         ResultSerializers.result.serialize(result, out);
                         break;
                 }
@@ -740,7 +1048,7 @@ public class AccordJournal implements accord.api.Journal, RangeSearcher.Supplier
             for (Field field = nextSetField(iterable) ; field != null; field = nextSetField(iterable = unsetIterable(field, iterable)))
             {
                 // Since we are iterating in reverse order, we skip the fields that were
-                // set by entries writter later (i.e. already read ones).
+                // set by entries written later (i.e. already read ones).
                 if (isChanged(field, flags) && field != CLEANUP)
                     skip(txnId, field, in, userVersion);
                 else
@@ -768,7 +1076,7 @@ public class AccordJournal implements accord.api.Journal, RangeSearcher.Supplier
                     saveStatus = SaveStatus.values()[in.readByte()];
                     break;
                 case DURABILITY:
-                    durability = Durability.values()[in.readByte()];
+                    durability = Durability.forEncoded(in.readUnsignedByte());
                     break;
                 case ACCEPTED:
                     acceptedOrCommitted = CommandSerializers.ballot.deserialize(in);
@@ -783,10 +1091,24 @@ public class AccordJournal implements accord.api.Journal, RangeSearcher.Supplier
                     partialTxn = CommandSerializers.partialTxn.deserialize(in, userVersion);
                     break;
                 case PARTIAL_DEPS:
-                    partialDeps = DepsSerializers.partialDeps.deserialize(in);
+                    // TODO (required): this optimisation will be easily disabled;
+                    //  should either operate natively on ByteBuffer
+                    //  or else use some explicit API for copying bytes while skipping
+                    if (deserializeDeps || !(in instanceof DataInputBuffer))
+                    {
+                        partialDeps = DepsSerializers.partialDepsById.deserialize(in);
+                    }
+                    else
+                    {
+                        ByteBuffer buf = ((DataInputBuffer)in).buffer();
+                        int start = buf.position();
+                        DepsSerializers.partialDepsById.skip(in);
+                        int end = buf.position();
+                        partialDeps = buf.duplicate().position(start).limit(end);
+                    }
                     break;
                 case WAITING_ON:
-                    waitingOn = WaitingOnSerializer.deserializeProvider(txnId, in);
+                    waitingOn = WaitingOnSerializer.deserializeBitSets(txnId, in);
                     break;
                 case WRITES:
                     writes = CommandSerializers.writes.deserialize(in, userVersion);
@@ -826,25 +1148,24 @@ public class AccordJournal implements accord.api.Journal, RangeSearcher.Supplier
                     CommandSerializers.ballot.skip(in);
                     break;
                 case PARTICIPANTS:
-                    CommandSerializers.participants.deserialize(in);
+                    CommandSerializers.participants.skip(in);
                     break;
                 case PARTIAL_TXN:
-                    CommandSerializers.partialTxn.deserialize(in, userVersion);
+                    CommandSerializers.partialTxn.skip(in, userVersion);
                     break;
                 case PARTIAL_DEPS:
-                    // TODO (expected): skip
-                    DepsSerializers.partialDeps.deserialize(in);
+                    DepsSerializers.partialDepsById.skip(in);
                     break;
                 case WAITING_ON:
                     WaitingOnSerializer.skip(txnId, in);
                     break;
                 case WRITES:
                     // TODO (expected): skip
-                    CommandSerializers.writes.deserialize(in, userVersion);
+                    CommandSerializers.writes.skip(in, userVersion);
                     break;
                 case RESULT:
                     // TODO (expected): skip
-                    ResultSerializers.result.deserialize(in);
+                    ResultSerializers.result.skip(in);
                     break;
             }
         }

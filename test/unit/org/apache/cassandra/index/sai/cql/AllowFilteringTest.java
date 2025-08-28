@@ -18,14 +18,17 @@
 
 package org.apache.cassandra.index.sai.cql;
 
+import org.junit.BeforeClass;
 import org.junit.Test;
 
+import org.apache.cassandra.cql3.CQLTester;
 import org.apache.cassandra.cql3.restrictions.StatementRestrictions;
 import org.apache.cassandra.index.IndexBuildInProgressException;
 import org.apache.cassandra.index.sai.SAITester;
 import org.apache.cassandra.index.sai.StorageAttachedIndex;
 import org.apache.cassandra.inject.Injections;
 import org.apache.cassandra.inject.InvokePointBuilder;
+import org.apache.cassandra.service.StorageService;
 
 import static java.lang.String.format;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -36,6 +39,13 @@ import static org.junit.Assert.assertNotNull;
  */
 public class AllowFilteringTest extends SAITester
 {
+    @BeforeClass
+    public static void setup()
+    {
+        StorageService.instance.unsafeSetInitialized();
+        CQLTester.disableCoordinatorExecution();
+    }
+
     @Test
     public void testAllowFilteringOnFirstClusteringKeyColumn() throws Throwable
     {

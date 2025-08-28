@@ -25,55 +25,26 @@ import javax.annotation.Nullable;
 import javax.annotation.concurrent.NotThreadSafe;
 
 import accord.utils.Invariants;
-import org.apache.cassandra.service.accord.serializers.Version;
 
 /**
  * Item that is serialized by default
  */
 @NotThreadSafe
-public abstract class AbstractSerialized<T, P>
+public abstract class AbstractSerialized<T>
 {
-    private @Nullable final ByteBuffer latestVersionBytes;
-    private transient @Nullable T memoized = null;
+    protected @Nullable final ByteBuffer latestVersionBytes;
+    protected transient @Nullable T memoized = null;
 
-    protected AbstractSerialized(@Nullable ByteBuffer latestVersionBytes)
+    public AbstractSerialized(@Nullable ByteBuffer latestVersionBytes)
     {
         this.latestVersionBytes = latestVersionBytes;
     }
 
-    @Override
-    public boolean equals(Object o)
-    {
-        if (this == o) return true;
-        if (o == null || (o.getClass() != getClass())) return false;
-
-        AbstractSerialized<?,?> that = (AbstractSerialized<?,?>) o;
-        return Objects.equals(latestVersionBytes, that.latestVersionBytes);
-    }
-
-    @Override
-    public int hashCode()
-    {
-        return latestVersionBytes != null ? latestVersionBytes.hashCode() : 0;
-    }
-
     public abstract long estimatedSizeOnHeap();
-    protected abstract ByteBuffer serialize(T value, P param, Version version);
-    protected abstract ByteBuffer reserialize(ByteBuffer bytes, P param, Version srcVersion, Version trgVersion);
-    protected abstract T deserialize(P param, ByteBuffer bytes, Version version);
 
     protected boolean isNull()
     {
         return latestVersionBytes == null;
-    }
-
-    @Nullable
-    protected T deserialize(P param)
-    {
-        T result = memoized;
-        if (result == null && latestVersionBytes != null)
-            memoized = result = deserialize(param, latestVersionBytes, Version.LATEST);
-        return result;
     }
 
     public void unmemoize()
@@ -88,11 +59,25 @@ public abstract class AbstractSerialized<T, P>
     }
 
     @Nonnull
-    protected ByteBuffer bytes(P param, Version target)
+    protected ByteBuffer bytes()
     {
         Invariants.nonNull(latestVersionBytes);
-        if (Version.LATEST == target)
-            return latestVersionBytes;
-        return reserialize(latestVersionBytes, param, Version.LATEST, target);
+        return latestVersionBytes;
+    }
+
+    @Override
+    public boolean equals(Object o)
+    {
+        if (this == o) return true;
+        if (o == null || (o.getClass() != getClass())) return false;
+
+        AbstractSerialized<?> that = (AbstractSerialized<?>) o;
+        return Objects.equals(latestVersionBytes, that.latestVersionBytes);
+    }
+
+    @Override
+    public int hashCode()
+    {
+        return latestVersionBytes != null ? latestVersionBytes.hashCode() : 0;
     }
 }
