@@ -28,18 +28,14 @@ import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.function.LongPredicate;
 import java.util.function.Supplier;
-
-import com.google.common.annotations.VisibleForTesting;
-import com.google.common.collect.ImmutableSet;
-import com.google.common.collect.Ordering;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
 import accord.local.Cleanup;
 import accord.local.DurableBefore;
 import accord.local.RedundantBefore;
 import accord.utils.Invariants;
 import accord.utils.UnhandledEnum;
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.Ordering;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.ColumnIdentifier;
 import org.apache.cassandra.db.AbstractCompactionController;
@@ -99,6 +95,7 @@ import org.apache.cassandra.service.accord.IAccordService.AccordCompactionInfos;
 import org.apache.cassandra.service.accord.JournalKey;
 import org.apache.cassandra.service.accord.api.TokenKey;
 import org.apache.cassandra.service.accord.journal.AccordTopologyUpdate;
+import org.apache.cassandra.service.accord.journal.AccordTopologyUpdate.TopologyImage;
 import org.apache.cassandra.service.accord.serializers.Version;
 import org.apache.cassandra.service.paxos.PaxosRepairHistory;
 import org.apache.cassandra.service.paxos.uncommitted.PaxosRows;
@@ -108,6 +105,9 @@ import org.apache.cassandra.utils.NoSpamLogger.NoSpamLogStatement;
 import org.apache.cassandra.utils.TimeUUID;
 import org.apache.cassandra.utils.btree.BTree;
 import org.apache.cassandra.utils.btree.UpdateFunction;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 
 import static accord.local.Cleanup.ERASE;
 import static accord.local.Cleanup.Input.PARTIAL;
@@ -119,6 +119,8 @@ import static org.apache.cassandra.config.Config.PaxosStatePurging.legacy;
 import static org.apache.cassandra.config.DatabaseDescriptor.paxosStatePurging;
 import static org.apache.cassandra.service.accord.AccordKeyspace.CFKAccessor;
 import static org.apache.cassandra.service.accord.AccordKeyspace.JournalColumns.getJournalKey;
+import static org.apache.cassandra.service.accord.journal.AccordTopologyUpdate.Kind.Image;
+import static org.apache.cassandra.service.accord.journal.AccordTopologyUpdate.Kind.Repeat;
 
 /**
  * Merge multiple iterators over the content of sstable into a "compacted" iterator.
@@ -864,18 +866,14 @@ public class CompactionIterator extends CompactionInfo.Holder implements Unfilte
 
         JournalKey key;
         AccordRowCompactor<?> compactor;
-        // Initialize topology serializer during compaction to avoid deserializing redundant epochs
-        FlyweightSerializer<AccordTopologyUpdate, FlyweightImage> topologySerializer;
         final Version userVersion;
 
         public AccordJournalPurger(AccordCompactionInfos compactionInfos, Version version, ColumnFamilyStore cfs)
         {
             this.userVersion = version;
-
             this.infos = compactionInfos;
             this.recordColumn = cfs.metadata().getColumn(ColumnIdentifier.getInterned("record", false));
             this.versionColumn = cfs.metadata().getColumn(ColumnIdentifier.getInterned("user_version", false));
-            this.topologySerializer = (FlyweightSerializer<AccordTopologyUpdate, FlyweightImage>) (FlyweightSerializer) new AccordTopologyUpdate.AccumulatingSerializer(() -> infos.minEpoch);
         }
 
         @SuppressWarnings("unchecked")
@@ -891,7 +889,7 @@ public class CompactionIterator extends CompactionInfo.Holder implements Unfilte
                         compactor = new AccordCommandRowCompactor(infos, userVersion, nowInSec);
                         break;
                     case TOPOLOGY_UPDATE:
-                        compactor = new AccordMergingCompactor(topologySerializer, userVersion);
+                        compactor = new TopologyCompactor((FlyweightSerializer<Object, AccordTopologyUpdate.Accumulator>) key.type.serializer, userVersion, infos.minEpoch);
                         break;
                     default:
                         compactor = new AccordMergingCompactor(key.type.serializer, userVersion);
@@ -943,6 +941,57 @@ public class CompactionIterator extends CompactionInfo.Holder implements Unfilte
         abstract void reset(JournalKey key, UnfilteredRowIterator partition);
         abstract void collect(JournalKey key, Row row, ByteBuffer bytes, Version userVersion) throws IOException;
         abstract UnfilteredRowIterator result(JournalKey journalKey, DecoratedKey partitionKey) throws IOException;
+    }
+
+    static class TopologyCompactor extends AccordMergingCompactor<AccordTopologyUpdate.Accumulator>
+    {
+        TopologyImage lastImage;
+        boolean hasWritten;
+        final long minEpoch;
+
+        TopologyCompactor(FlyweightSerializer<Object, AccordTopologyUpdate.Accumulator> serializer, Version userVersion, long minEpoch)
+        {
+            super(serializer, userVersion);
+            this.minEpoch = minEpoch;
+        }
+
+        @Override
+        void reset(JournalKey key, UnfilteredRowIterator partition)
+        {
+            super.reset(key, partition);
+        }
+
+        @Override
+        UnfilteredRowIterator result(JournalKey journalKey, DecoratedKey partitionKey) throws IOException
+        {
+            Invariants.require(lastImage != null || !hasWritten);
+            TopologyImage read = builder.read();
+
+            if (read.epoch() < minEpoch)
+            {
+                if (read.kind() == Image)
+                    lastImage = read;
+                return null;
+            }
+
+            TopologyImage write = read;
+            if (read.kind() == Repeat && !hasWritten)
+            {
+                Invariants.require(lastImage != null);
+                write = new TopologyImage(read.epoch(), Image, lastImage.getUpdate());
+            }
+            else if (hasWritten && read.kind() == Repeat && lastImage.getUpdate().isEquivalent(read.getUpdate()))
+            {
+                write = read.asRepeat();
+            }
+
+            if (write.kind() == Image)
+                lastImage = write;
+
+            hasWritten = true;
+            builder.write(write);
+            return super.result(journalKey, partitionKey);
+        }
     }
 
     static class AccordMergingCompactor<T extends FlyweightImage> extends AccordRowCompactor<T>

@@ -140,9 +140,9 @@ public class AccordTopologyUpdateTest
             AccordTopologyUpdate.Kind kind = kindGen.next(rs);
             switch (kind)
             {
-                case NewTopology: return new AccordTopologyUpdate.NewTopology(topologyUpdateGen.next(rs));
-                case TopologyImage: return new AccordTopologyUpdate.TopologyImage(epochGen.nextLong(rs), AccordTopologyUpdate.Kind.TopologyImage);
-                case NoOp: return new AccordTopologyUpdate.TopologyImage(epochGen.nextLong(rs), AccordTopologyUpdate.Kind.NoOp);
+                case New: return new AccordTopologyUpdate.NewTopology(topologyUpdateGen.next(rs));
+                case Image: return new AccordTopologyUpdate.TopologyImage(epochGen.nextLong(rs), AccordTopologyUpdate.Kind.Image, topologyUpdateGen.next(rs));
+                case Repeat: return new AccordTopologyUpdate.TopologyImage(epochGen.nextLong(rs), AccordTopologyUpdate.Kind.Repeat);
                 default: throw new AssertionError("Unknown kind: " + kind);
             }
         };
@@ -155,10 +155,9 @@ public class AccordTopologyUpdateTest
 
     private static void maybeUpdatePartitioner(AccordTopologyUpdate expected)
     {
-        if (expected instanceof AccordTopologyUpdate.NewTopology)
-        {
-            maybeUpdatePartitioner(((AccordTopologyUpdate.NewTopology) expected).update);
-        }
+        Journal.TopologyUpdate update = expected.getUpdate();
+        if (update != null)
+            maybeUpdatePartitioner(expected.getUpdate());
     }
 
     private void maybeUpdatePartitioner(CommandStores.RangesForEpoch expected)

@@ -22,7 +22,6 @@ import java.util.List;
 import java.util.NavigableMap;
 import java.util.Objects;
 import java.util.concurrent.Callable;
-import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReferenceFieldUpdater;
@@ -38,6 +37,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import accord.api.Agent;
+import accord.api.AsyncExecutor;
 import accord.api.DataStore;
 import accord.api.Journal;
 import accord.api.LocalListeners;
@@ -74,7 +74,6 @@ import org.apache.cassandra.service.accord.AccordKeyspace.CommandsForKeyAccessor
 import org.apache.cassandra.service.accord.IAccordService.AccordCompactionInfo;
 import org.apache.cassandra.service.accord.api.TokenKey;
 import org.apache.cassandra.service.accord.txn.TxnRead;
-import org.apache.cassandra.service.paxos.PaxosState;
 import org.apache.cassandra.utils.Clock;
 
 import static accord.api.Journal.CommandUpdate;
@@ -190,7 +189,7 @@ public class AccordCommandStore extends CommandStore
             this.caches = new ExclusiveCaches(sharedExecutor.lock, exclusive.global, commands, commandsForKey);
         }
 
-        this.exclusiveExecutor = sharedExecutor.executor();
+        this.exclusiveExecutor = sharedExecutor.executor(id);
         this.commandsForRanges = new CommandsForRanges.Manager(this);
 
         maybeLoadRedundantBefore(journal.loadRedundantBefore(id()));
@@ -248,7 +247,7 @@ public class AccordCommandStore extends CommandStore
     // TODO (desired): we use this for executing callbacks with mutual exclusivity,
     //  but we don't need to block the actual CommandStore - could quite easily
     //  inflate a separate queue dynamically in AccordExecutor
-    public Executor taskExecutor()
+    public AsyncExecutor taskExecutor()
     {
         return exclusiveExecutor;
     }
@@ -337,25 +336,30 @@ public class AccordCommandStore extends CommandStore
         return lastSystemTimestampMicros;
     }
     @Override
-    public <T> AsyncChain<T> build(PreLoadContext loadCtx, Function<? super SafeCommandStore, T> function)
+    public <T> AsyncChain<T> chain(PreLoadContext loadCtx, Function<? super SafeCommandStore, T> function)
     {
         return AccordTask.create(this, loadCtx, function).chain();
     }
 
     @Override
-    public <T> AsyncChain<T> build(Callable<T> task)
-    {
-        return AsyncChains.ofCallable(taskExecutor(), task);
-    }
-
-    @Override
-    public AsyncChain<Void> build(PreLoadContext preLoadContext, Consumer<? super SafeCommandStore> consumer)
+    public AsyncChain<Void> chain(PreLoadContext preLoadContext, Consumer<? super SafeCommandStore> consumer)
     {
         return AccordTask.create(this, preLoadContext, consumer).chain();
     }
 
-    public AccordSafeCommandStore begin(AccordTask<?> operation,
-                                        @Nullable CommandsForRanges commandsForRanges)
+    @Override
+    public <T> AsyncChain<T> chain(Callable<T> call)
+    {
+        return taskExecutor().chain(call);
+    }
+
+    @Override
+    public void execute(Runnable run)
+    {
+        taskExecutor().execute(run);
+    }
+
+    public AccordSafeCommandStore begin(AccordTask<?> operation, @Nullable CommandsForRanges commandsForRanges)
     {
         require(current == null);
         current = AccordSafeCommandStore.create(operation, commandsForRanges, this);
@@ -496,7 +500,7 @@ public class AccordCommandStore extends CommandStore
                 }
             }
 
-            ready.begin((success, fail) -> {
+            ready.invoke((success, fail) -> {
                 if (fail != null)
                 {
                     logger.error("{}: failed to ensure durability of {} ({})", this, ranges, reportId, fail);
@@ -542,7 +546,7 @@ public class AccordCommandStore extends CommandStore
             if (onlyNonDurable && !maybeShouldReplay(txnId))
                 return AsyncChains.success(null);
 
-            return store.submit(PreLoadContext.contextFor(txnId, "Replay"), safeStore -> {
+            return store.chain(PreLoadContext.contextFor(txnId, "Replay"), safeStore -> {
                 if (onlyNonDurable && !shouldReplay(txnId, safeStore.unsafeGet(txnId).current().participants()))
                     return null;
 
@@ -582,13 +586,6 @@ public class AccordCommandStore extends CommandStore
     {
         if (rangesForEpoch != null)
             loadRangesForEpoch(rangesForEpoch);
-    }
-
-    @Override
-    public void updateRangesForEpoch(SafeCommandStore safeStore)
-    {
-        super.updateRangesForEpoch(safeStore);
-        updateMinHlc(PaxosState.ballotTracker().getLowBound().unixMicros() + 1);
     }
 
     // TODO (expected): handle journal failures, and consider how we handle partial failures.

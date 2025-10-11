@@ -40,9 +40,10 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import accord.api.Agent;
-import accord.api.AsyncExecutor;
 import accord.api.RoutingKey;
+import accord.impl.AbstractAsyncExecutor;
 import accord.local.Command;
+import accord.local.PreLoadContext;
 import accord.local.SequentialAsyncExecutor;
 import accord.local.cfk.CommandsForKey;
 import accord.primitives.TxnId;
@@ -55,6 +56,10 @@ import accord.utils.QuintConsumer;
 import accord.utils.TriConsumer;
 import accord.utils.TriFunction;
 import accord.utils.UnhandledEnum;
+import accord.utils.async.AsyncCallbacks.CallAndCallback;
+import accord.utils.async.AsyncCallbacks.FlatCallAndCallback;
+import accord.utils.async.AsyncCallbacks.RunAndCallback;
+import accord.utils.async.AsyncCallbacks.RunOrFail;
 import accord.utils.async.AsyncChain;
 import accord.utils.async.AsyncChains;
 import accord.utils.async.Cancellable;
@@ -88,13 +93,14 @@ import static org.apache.cassandra.service.accord.AccordTask.State.WAITING_TO_RU
 
 /**
  * NOTE: We assume that NO BLOCKING TASKS are submitted to this executor AND WAITED ON by another task executing on this executor.
+ *  (as we do not immediately schedule additional threads for submitted tasks, but schedule new threads only if necessary when the submitting execution completes)
  */
-public abstract class AccordExecutor implements CacheSize, LoadExecutor<AccordTask<?>, Boolean>, SaveExecutor, Shutdownable, AsyncExecutor
+public abstract class AccordExecutor implements CacheSize, LoadExecutor<AccordTask<?>, Boolean>, SaveExecutor, Shutdownable, AbstractAsyncExecutor
 {
     private static final Logger logger = LoggerFactory.getLogger(AccordExecutor.class);
     public interface AccordExecutorFactory
     {
-        AccordExecutor get(int executorId, Mode mode, int threads, IntFunction<String> name, AccordCacheMetrics metrics, Agent agent);
+        AccordExecutor get(int executorId, Mode mode, int threads, IntFunction<String> name, Agent agent);
     }
 
     public enum Mode { RUN_WITH_LOCK, RUN_WITHOUT_LOCK }
@@ -190,19 +196,19 @@ public abstract class AccordExecutor implements CacheSize, LoadExecutor<AccordTa
     int tasks;
     int runningThreads;
 
-    AccordExecutor(Lock lock, int executorId, AccordCacheMetrics metrics, Agent agent)
+    AccordExecutor(Lock lock, int executorId, Agent agent)
     {
         this.lock = lock;
         this.executorId = executorId;
-        this.cache = new AccordCache(this, 0, metrics);
+        this.cache = new AccordCache(this, 0);
         this.agent = agent;
 
         final AccordCache.Type<TxnId, Command, AccordSafeCommand> commands;
         final AccordCache.Type<RoutingKey, CommandsForKey, AccordSafeCommandsForKey> commandsForKey;
-        commands = cache.newType(TxnId.class, COMMAND_ADAPTER);
+        commands = cache.newType(TxnId.class, COMMAND_ADAPTER, AccordCacheMetrics.CommandsCacheMetrics.newShard(lock));
         registerJfrListener(executorId, commands, "Command");
 
-        commandsForKey = cache.newType(RoutingKey.class, CFK_ADAPTER);
+        commandsForKey = cache.newType(RoutingKey.class, CFK_ADAPTER, AccordCacheMetrics.CommandsForKeyCacheMetrics.newShard(lock));
         registerJfrListener(executorId, commandsForKey, "CommandsForKey");
 
         this.caches = new ExclusiveGlobalCaches(this, cache, commands, commandsForKey);
@@ -428,16 +434,10 @@ public abstract class AccordExecutor implements CacheSize, LoadExecutor<AccordTa
     }
 
     @Override
-    public <T> AsyncChain<T> build(Callable<T> task)
+    public Cancellable execute(RunOrFail runOrFail)
     {
-        return new AsyncChains.Head<>()
-        {
-            @Override
-            protected Cancellable start(BiConsumer<? super T, Throwable> callback)
-            {
-                return submit(new PlainChain<>(task, callback, null));
-            }
-        };
+        PlainChain submit = new PlainChain(runOrFail);
+        return submit(submit);
     }
 
     public <T> AsyncChain<T> buildDebuggable(Callable<T> task, Object describe)
@@ -447,7 +447,7 @@ public abstract class AccordExecutor implements CacheSize, LoadExecutor<AccordTa
             @Override
             protected Cancellable start(BiConsumer<? super T, Throwable> callback)
             {
-                return submit(new DebuggableChain<>(task, callback, null, describe));
+                return submit(new DebuggableChain(new CallAndCallback<>(task, callback), null, 0, describe));
             }
         };
     }
@@ -509,6 +509,11 @@ public abstract class AccordExecutor implements CacheSize, LoadExecutor<AccordTa
     public SequentialExecutor executor()
     {
         return new SequentialExecutor();
+    }
+
+    public SequentialExecutor executor(int commandStoreId)
+    {
+        return new SequentialExecutor(commandStoreId);
     }
 
     public SequentialAsyncExecutor newSequentialExecutor()
@@ -574,7 +579,7 @@ public abstract class AccordExecutor implements CacheSize, LoadExecutor<AccordTa
 
     void submitExclusive(Runnable runnable)
     {
-        submitPlainExclusive(new PlainRunnable(null, runnable, null));
+        submitPlainExclusive(new PlainRunnable(null, runnable));
     }
 
     private void submitPlainExclusive(Plain task)
@@ -767,14 +772,14 @@ public abstract class AccordExecutor implements CacheSize, LoadExecutor<AccordTa
 
     public Future<?> submit(Runnable run)
     {
-        PlainRunnable task = new PlainRunnable(new AsyncPromise<>(), run, null);
+        PlainRunnable task = new PlainRunnable(new AsyncPromise<>(), run);
         submit(task);
         return task.result;
     }
 
     public void execute(Runnable command)
     {
-        submit(new PlainRunnable(null, command, null));
+        submit(new PlainRunnable(null, command));
     }
 
     private Cancellable submit(Plain task)
@@ -795,11 +800,6 @@ public abstract class AccordExecutor implements CacheSize, LoadExecutor<AccordTa
             beforeUnlock();
             lock.unlock();
         }
-    }
-
-    public void execute(Runnable command, AccordCommandStore commandStore)
-    {
-        submit(new PlainRunnable(null, command, commandStore.exclusiveExecutor));
     }
 
     @Override
@@ -962,6 +962,7 @@ public abstract class AccordExecutor implements CacheSize, LoadExecutor<AccordTa
     private static final AtomicReferenceFieldUpdater<SequentialExecutor, Thread> ownerUpdater = AtomicReferenceFieldUpdater.newUpdater(SequentialExecutor.class, Thread.class, "owner");
     public class SequentialExecutor extends TaskQueue<Task> implements SequentialAsyncExecutor
     {
+        final int commandStoreId;
         final SequentialQueueTask selfTask;
         private Task task;
         private volatile Thread owner, waiting;
@@ -969,7 +970,13 @@ public abstract class AccordExecutor implements CacheSize, LoadExecutor<AccordTa
 
         SequentialExecutor()
         {
+            this(-1);
+        }
+
+        SequentialExecutor(int commandStoreId)
+        {
             super(WAITING_TO_RUN);
+            this.commandStoreId = commandStoreId;
             this.selfTask = new SequentialQueueTask(this);
         }
 
@@ -1093,53 +1100,91 @@ public abstract class AccordExecutor implements CacheSize, LoadExecutor<AccordTa
         }
 
         @Override
-        public <T> AsyncChain<T> build(Callable<T> call)
+        public AsyncChain<Void> chain(Runnable run)
         {
-            int position = inExecutor() && task != null ? task.queuePosition : 0;
+            int position = inheritQueuePosition();
             return new AsyncChains.Head<>()
             {
                 @Override
-                protected Cancellable start(BiConsumer<? super T, Throwable> callback)
+                protected Cancellable start(BiConsumer<? super Void, Throwable> callback)
                 {
-                    PlainChain<T> submit = new PlainChain<>(call, callback, SequentialExecutor.this);
-                    submit.queuePosition = position;
-                    return AccordExecutor.this.submit(submit);
+                    return execute(new RunAndCallback(run, callback), position);
                 }
             };
         }
 
         @Override
+        public <T> AsyncChain<T> chain(Callable<T> call)
+        {
+            int position = inheritQueuePosition();
+            return new AsyncChains.Head<>()
+            {
+                @Override
+                protected Cancellable start(BiConsumer<? super T, Throwable> callback)
+                {
+                    return execute(new CallAndCallback<>(call, callback), position);
+                }
+            };
+        }
+
+        @Override
+        public <T> AsyncChain<T> flatChain(Callable<? extends AsyncChain<T>> call)
+        {
+            int position = inheritQueuePosition();
+            return new AsyncChains.Head<>()
+            {
+                @Override
+                protected Cancellable start(BiConsumer<? super T, Throwable> callback)
+                {
+                    return execute(new FlatCallAndCallback<>(call, callback), position);
+                }
+            };
+        }
+
+        @Override
+        public Cancellable execute(RunOrFail runOrFail)
+        {
+            return execute(runOrFail, inheritQueuePosition());
+        }
+
+        private int inheritQueuePosition()
+        {
+            return inExecutor() && task != null ? task.queuePosition : 0;
+        }
+
+        private Cancellable execute(RunOrFail runOrFail, int queuePosition)
+        {
+            PlainChain submit = new PlainChain(runOrFail, SequentialExecutor.this, queuePosition);
+            return AccordExecutor.this.submit(submit);
+        }
+
+        @Override
         public void execute(Runnable run)
         {
-            PlainRunnable submit = new PlainRunnable(null, run, this);
-            if (inExecutor() && this.task != null)
-                submit.queuePosition = this.task.queuePosition;
+            PlainRunnable submit = new PlainRunnable(null, run, this, inheritQueuePosition());
             AccordExecutor.this.submit(submit);
         }
 
         @Override
-        public void maybeExecuteImmediately(Runnable run)
+        public boolean tryExecuteImmediately(Runnable run)
         {
             Thread self = Thread.currentThread();
             Thread owner = this.owner;
-            if (owner == self || (owner == null && ownerUpdater.compareAndSet(this, null, self)))
+            if (owner != null ? owner != self : !ownerUpdater.compareAndSet(this, null, self))
+                return false;
+
+            try { run.run(); }
+            catch (Throwable t) { agent.onUncaughtException(t); }
+            finally
             {
-                try { run.run(); }
-                catch (Throwable t) { agent.onUncaughtException(t); }
-                finally
+                if (owner == null)
                 {
-                    if (owner == null)
-                    {
-                        this.owner = null;
-                        if (waiting != null)
-                            LockSupport.unpark(waiting);
-                    }
+                    this.owner = null;
+                    if (waiting != null)
+                        LockSupport.unpark(waiting);
                 }
             }
-            else
-            {
-                execute(run);
-            }
+            return true;
         }
     }
 
@@ -1178,6 +1223,11 @@ public abstract class AccordExecutor implements CacheSize, LoadExecutor<AccordTa
         {
             ensureHeapified();
             return peekNode();
+        }
+
+        protected T get(int index)
+        {
+            return super.get(index);
         }
 
         protected void remove(T remove)
@@ -1268,14 +1318,20 @@ public abstract class AccordExecutor implements CacheSize, LoadExecutor<AccordTa
 
         PlainRunnable(Runnable run)
         {
-            this(null, run, null);
+            this(null, run);
         }
 
-        PlainRunnable(AsyncPromise<Void> result, Runnable run, @Nullable SequentialExecutor executor)
+        PlainRunnable(AsyncPromise<Void> result, Runnable run)
+        {
+            this(result, run, null, 0);
+        }
+
+        PlainRunnable(AsyncPromise<Void> result, Runnable run, @Nullable SequentialExecutor executor, int queuePosition)
         {
             this.result = result;
             this.run = run;
             this.executor = executor;
+            this.queuePosition = queuePosition;
         }
 
         @Override
@@ -1495,17 +1551,21 @@ public abstract class AccordExecutor implements CacheSize, LoadExecutor<AccordTa
         }
     }
 
-    class PlainChain<T> extends Plain
+    class PlainChain extends Plain
     {
-        final Callable<T> call;
-        final BiConsumer<? super T, Throwable> callback;
+        final RunOrFail runOrFail;
         final @Nullable SequentialExecutor executor;
 
-        PlainChain(Callable<T> call, BiConsumer<? super T, Throwable> callback, @Nullable SequentialExecutor executor)
+        PlainChain(RunOrFail runOrFail)
         {
-            this.call = call;
-            this.callback = callback;
+            this(runOrFail, null, 0);
+        }
+
+        PlainChain(RunOrFail runOrFail, @Nullable SequentialExecutor executor, int queuePosition)
+        {
+            this.runOrFail = runOrFail;
             this.executor = executor;
+            this.queuePosition = queuePosition;
         }
 
         @Override
@@ -1517,23 +1577,14 @@ public abstract class AccordExecutor implements CacheSize, LoadExecutor<AccordTa
         @Override
         protected void runInternal()
         {
-            T success;
             try (Closeable close = locals.get())
             {
-                success = call.call();
-            }
-            catch (Throwable t)
-            {
-                fail(t);
-                return;
-            }
-            try
-            {
-                callback.accept(success, null);
+                runOrFail.run();
             }
             catch (Throwable t)
             {
                 agent.onUncaughtException(t);
+                return;
             }
         }
 
@@ -1542,7 +1593,7 @@ public abstract class AccordExecutor implements CacheSize, LoadExecutor<AccordTa
         {
             try
             {
-                callback.accept(null, fail);
+                runOrFail.fail(fail);
             }
             catch (Throwable t)
             {
@@ -1552,15 +1603,15 @@ public abstract class AccordExecutor implements CacheSize, LoadExecutor<AccordTa
         }
     }
 
-    class DebuggableChain<T> extends PlainChain<T> implements DebuggableTask
+    class DebuggableChain extends PlainChain implements DebuggableTask
     {
         final long createdAtNanos;
         long startedAtNanos;
         final Object describe;
 
-        DebuggableChain(Callable<T> call, BiConsumer<? super T, Throwable> callback, @Nullable SequentialExecutor executor, Object describe)
+        DebuggableChain(RunOrFail runOrFail, @Nullable SequentialExecutor executor, int queuePosition, Object describe)
         {
-            super(call, callback, executor);
+            super(runOrFail, executor, queuePosition);
             this.createdAtNanos = MonotonicClock.Global.approxTime.now();
             this.describe = Invariants.nonNull(describe);
         }
@@ -1600,4 +1651,113 @@ public abstract class AccordExecutor implements CacheSize, LoadExecutor<AccordTa
             return this;
         }
     }
+
+
+    public static class TaskInfo implements Comparable<TaskInfo>
+    {
+        public enum Status { WAITING_TO_LOAD, SCANNING_RANGES, LOADING, WAITING_TO_RUN, RUNNING }
+
+        final Status status;
+        final int commandStoreId;
+
+        final Task task;
+
+        public TaskInfo(Status status, int commandStoreId, Task task)
+        {
+            this.status = status;
+            this.commandStoreId = commandStoreId;
+            this.task = task;
+        }
+
+        public Status status()
+        {
+            return status;
+        }
+
+        public Integer commandStoreId()
+        {
+            return commandStoreId >= 0 ? commandStoreId : null;
+        }
+
+        public int position()
+        {
+            return task.queuePosition;
+        }
+
+        public @Nullable String describe()
+        {
+            if (task instanceof AccordTask)
+                return ((AccordTask<?>) task).preLoadContext().reason();
+
+            if (task instanceof DebuggableTask)
+                return ((DebuggableTask) task).description();
+
+            return null;
+        }
+
+        public @Nullable PreLoadContext preLoadContext()
+        {
+            if (task instanceof AccordTask)
+                return ((AccordTask<?>) task).preLoadContext();
+            return null;
+        }
+
+        @Override
+        public int compareTo(TaskInfo that)
+        {
+            int c = this.status.compareTo(that.status);
+            if (c == 0) c = this.position() - that.position();
+            return c;
+        }
+    }
+
+    public List<TaskInfo> taskSnapshot()
+    {
+        List<TaskInfo> result = new ArrayList<>();
+        lock.lock();
+        try
+        {
+            addToSnapshot(result, waitingToLoad, TaskInfo.Status.WAITING_TO_LOAD, TaskInfo.Status.WAITING_TO_LOAD);
+            addToSnapshot(result, waitingToLoadRangeTxns, TaskInfo.Status.WAITING_TO_LOAD, TaskInfo.Status.WAITING_TO_LOAD);
+            addToSnapshot(result, scanningRanges, TaskInfo.Status.SCANNING_RANGES, TaskInfo.Status.SCANNING_RANGES);
+            addToSnapshot(result, loading, TaskInfo.Status.LOADING, TaskInfo.Status.LOADING);
+            addToSnapshot(result, waitingToRun, TaskInfo.Status.WAITING_TO_RUN, TaskInfo.Status.WAITING_TO_RUN);
+            addToSnapshot(result, running, TaskInfo.Status.RUNNING, TaskInfo.Status.WAITING_TO_RUN);
+        }
+        finally
+        {
+            lock.unlock();
+        }
+        result.sort(TaskInfo::compareTo);
+        return result;
+    }
+
+    private static List<Task> toSimpleSnapshotList(TaskQueue<?> queue)
+    {
+        List<Task> list = new ArrayList<>();
+        for (int i = 0 ; i < queue.size() ; i++)
+            list.add(queue.get(i));
+        return list;
+    }
+
+    private static void addToSnapshot(List<TaskInfo> snapshot, TaskQueue<?> queue, TaskInfo.Status ifCurrent, TaskInfo.Status ifQueued)
+    {
+        for (int i = 0 ; i < queue.size() ; ++i)
+        {
+            Task t = queue.get(i);
+            if (t instanceof SequentialQueueTask)
+            {
+                SequentialExecutor q = ((SequentialQueueTask) t).queue;
+                snapshot.add(new TaskInfo(ifCurrent, q.commandStoreId, q.task));
+                for (int j = 0 ; j < q.size() ; ++j)
+                    snapshot.add(new TaskInfo(ifQueued, q.commandStoreId, q.get(j)));
+            }
+            else
+            {
+                int commmandStoreId = t instanceof AccordTask ? ((AccordTask<?>) t).commandStore.id() : -1;
+                snapshot.add(new TaskInfo(ifCurrent, commmandStoreId, t));
+            }
+        }
+    }
+
 }

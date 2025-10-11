@@ -282,7 +282,7 @@ public class AccordInteropRead extends ReadData
                 return AsyncChains.success(new LocalReadData(new ArrayList<>(), readCommand));
 
             ReadCommand submit = readCommand.withTransactionalSettings(TxnNamedRead.readsWithoutReconciliation(txnRead.cassandraConsistencyLevel()), nowInSeconds);
-            return AsyncChains.ofCallable(Stage.READ.executor(), () -> new LocalReadData(key, ReadCommandVerbHandler.instance.doRead(submit, false), command));
+            return AsyncChains.chain(Stage.READ.executor(), () -> new LocalReadData(key, ReadCommandVerbHandler.instance.doRead(submit, false), command));
         }
 
         // This path can have a subrange we have never seen before provided by short read protection or read repair so we need to
@@ -297,7 +297,7 @@ public class AccordInteropRead extends ReadData
                 continue;
             ReadCommand submit = TxnNamedRead.commandForSubrange((PartitionRangeReadCommand) command, intersection, txnRead.cassandraConsistencyLevel(), nowInSeconds);
             TokenKey routingKey = ((TokenRange)r).start();
-            chains.add(AsyncChains.ofCallable(Stage.READ.executor(), () -> new LocalReadData(routingKey, ReadCommandVerbHandler.instance.doRead(submit, false), command)));
+            chains.add(AsyncChains.chain(Stage.READ.executor(), () -> new LocalReadData(routingKey, ReadCommandVerbHandler.instance.doRead(submit, false), command)));
         }
 
         if (chains.isEmpty())

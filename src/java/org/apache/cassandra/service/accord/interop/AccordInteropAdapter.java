@@ -115,12 +115,13 @@ public class AccordInteropAdapter extends TxnAdapter
     {
         Update update = txn.update();
         ConsistencyLevel consistencyLevel = update instanceof AccordUpdate ? ((AccordUpdate) update).cassandraCommitCL() : null;
+        // TODO (expected): do we care about consistency level on recovery? we aren't reporting to the client so we shouldn't.
         if (consistencyLevel == null || consistencyLevel == ConsistencyLevel.ANY || writes.isEmpty())
             return false;
 
         Topologies all = execution(node, any, sendTo, selectSendTo, fullRoute, txnId, executeAt);
-        new AccordInteropPersist(node, executor, all, txnId, require, ballot, txn, executeAt, deps, writes, result, fullRoute, consistencyLevel, CoordinationFlags.none(), informDurableOnDone, callback)
-            .start(Minimal, any, writes, result);
+        new AccordInteropPersist(node, executor, all, txnId, require, ballot, txn, executeAt, deps, writes, result, fullRoute, consistencyLevel, CoordinationFlags.none(), informDurableOnDone, Minimal, callback)
+            .start();
         return true;
     }
 }

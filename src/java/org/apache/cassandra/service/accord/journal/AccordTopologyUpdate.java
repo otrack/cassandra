@@ -19,16 +19,10 @@
 package org.apache.cassandra.service.accord.journal;
 
 import java.io.IOException;
-import java.util.Iterator;
 import java.util.Map;
-import java.util.NavigableMap;
 import java.util.Objects;
-import java.util.TreeMap;
-import java.util.function.Function;
-
 import accord.api.Journal;
 import accord.local.CommandStores;
-import accord.primitives.EpochSupplier;
 import accord.primitives.Ranges;
 import accord.topology.Topology;
 import accord.utils.Invariants;
@@ -50,6 +44,7 @@ public interface AccordTopologyUpdate
     Kind kind();
     void applyTo(TopologyImage accumulator);
     long epoch();
+    AccordTopologyUpdate asRepeat();
 
     Journal.TopologyUpdate getUpdate();
     static AccordTopologyUpdate newTopology(Journal.TopologyUpdate update)
@@ -92,7 +87,7 @@ public interface AccordTopologyUpdate
             long size = TypeSizes.sizeofUnsignedVInt(from.size());
             for (int i = 0; i < from.size(); i++)
             {
-                size += TypeSizes.sizeof(from.epochAtIndex(i));
+                size += TypeSizes.LONG_SIZE;
                 size += KeySerializers.ranges.serializedSize(from.rangesAtIndex(i));
             }
             return size;
@@ -156,28 +151,14 @@ public interface AccordTopologyUpdate
             out.writeUnsignedVInt32(t.kind().ordinal());
             switch (t.kind())
             {
-                case NewTopology:
+                case New:
                 {
                     TopologyUpdateSerializer.instance.serialize(((NewTopology) t).update, out);
                     break;
                 }
-                case NoOp:
-                {
+                case Repeat:
+                case Image:
                     TopologyImage image = (TopologyImage) t;
-                    Invariants.require(image.update == null);
-                    if (image.syncStatus == null)
-                        out.writeByte(Byte.MAX_VALUE);
-                    else
-                        out.writeByte(image.syncStatus.ordinal());
-
-                    KeySerializers.ranges.serialize(image.closed, out);
-                    KeySerializers.ranges.serialize(image.retired, out);
-                    break;
-                }
-                case TopologyImage:
-                {
-                    TopologyImage image = (TopologyImage) t;
-
                     out.writeBoolean(image.update != null);
                     if (image.update != null)
                         TopologyUpdateSerializer.instance.serialize(image.update, out);
@@ -189,7 +170,6 @@ public interface AccordTopologyUpdate
                     KeySerializers.ranges.serialize(image.closed, out);
                     KeySerializers.ranges.serialize(image.retired, out);
                     break;
-                }
                 default:
                     throw new UnhandledEnum(t.kind());
             }
@@ -200,27 +180,18 @@ public interface AccordTopologyUpdate
         {
             long epoch = in.readUnsignedVInt();
             Kind kind = Kind.values()[in.readUnsignedVInt32()];
+
             switch (kind)
             {
-                case NewTopology:
+                case New:
                     return new NewTopology(TopologyUpdateSerializer.instance.deserialize(in));
-                case NoOp:
-                {
-                    TopologyImage image = new TopologyImage(epoch, Kind.NoOp);
-                    byte syncStateByte = in.readByte();
-                    if (syncStateByte != Byte.MAX_VALUE)
-                        image.syncStatus = AccordConfigurationService.SyncStatus.values()[syncStateByte];
-
-                    image.closed = KeySerializers.ranges.deserialize(in);
-                    image.retired = KeySerializers.ranges.deserialize(in);
-                    return image;
-                }
-                case TopologyImage:
-                {
-                    TopologyImage image = new TopologyImage(epoch, Kind.TopologyImage);
+                case Repeat:
+                case Image:
+                    Journal.TopologyUpdate update = null;
                     if (in.readBoolean())
-                        image.update = TopologyUpdateSerializer.instance.deserialize(in);
+                        update = TopologyUpdateSerializer.instance.deserialize(in);
 
+                    TopologyImage image = new TopologyImage(epoch, kind, update);
                     byte syncStateByte = in.readByte();
                     if (syncStateByte != Byte.MAX_VALUE)
                         image.syncStatus = AccordConfigurationService.SyncStatus.values()[syncStateByte];
@@ -228,7 +199,6 @@ public interface AccordTopologyUpdate
                     image.closed = KeySerializers.ranges.deserialize(in);
                     image.retired = KeySerializers.ranges.deserialize(in);
                     return image;
-                }
                 default:
                     throw new UnhandledEnum(kind);
             }
@@ -242,34 +212,20 @@ public interface AccordTopologyUpdate
 
             switch (t.kind())
             {
-                case NewTopology:
+                case New:
                     size += TopologyUpdateSerializer.instance.serializedSize(((NewTopology) t).update);
                     break;
-                case NoOp:
-                {
+                case Image:
+                case Repeat:
                     TopologyImage image = (TopologyImage) t;
-                    Invariants.require(image.update == null);
-
-                    size += Byte.BYTES;
-
-                    size += KeySerializers.ranges.serializedSize(image.closed);
-                    size += KeySerializers.ranges.serializedSize(image.retired);
-                    break;
-                }
-                case TopologyImage:
-                {
-                    TopologyImage image = (TopologyImage) t;
-
-                    size += TypeSizes.sizeof(image.update != null);
+                    size += TypeSizes.BOOL_SIZE;
                     if (image.update != null)
                         size += TopologyUpdateSerializer.instance.serializedSize(image.update);
 
-                    size += Byte.BYTES;
-
+                    size += TypeSizes.BYTE_SIZE;
                     size += KeySerializers.ranges.serializedSize(image.closed);
                     size += KeySerializers.ranges.serializedSize(image.retired);
                     break;
-                }
                 default:
                     throw new UnhandledEnum(t.kind());
             }
@@ -280,51 +236,52 @@ public interface AccordTopologyUpdate
     enum Kind
     {
         // New Topology, written to journal when the node first learned about it
-        NewTopology,
+        New,
         // Used when accumulating state during compaction or replay
-        TopologyImage,
+        Image,
         // Effectively unchanged topology
-        NoOp
+        // During compaction, we can write a no-op if we know that from Accord's perspective topology has not changed
+        // (see CompactionIterator$TopologyCompactor). During replay/deserialization, we collect last known changed
+        // epoch, and reconstruct its topology.
+        Repeat
     }
 
-    class ImmutableTopoloyImage extends Journal.TopologyUpdate
-    {
-        public ImmutableTopoloyImage(TopologyImage image)
-        {
-            super(image.update.commandStores, image.update.global);
-        }
-    }
 
     class TopologyImage implements AccordTopologyUpdate
     {
+        private final long epoch;
+        private final Kind kind;
         private Journal.TopologyUpdate update;
         private AccordConfigurationService.SyncStatus syncStatus = null;
 
         private Ranges closed = Ranges.EMPTY;
         private Ranges retired = Ranges.EMPTY;
 
-        private final long epoch;
-        private final Kind kind;
 
         public TopologyImage(long epoch, Kind kind)
         {
-            Invariants.require(kind != Kind.NewTopology);
+            this.epoch = epoch;
+            this.kind = Invariants.requireArgument(kind, kind == Kind.Repeat);
+        }
+
+        public TopologyImage(long epoch, Kind kind, Journal.TopologyUpdate update)
+        {
             this.epoch = epoch;
             this.kind = kind;
+            this.update = Invariants.requireArgument(update, update != null || kind == Kind.Repeat);
         }
 
         public TopologyImage asImage(Journal.TopologyUpdate update)
         {
-            TopologyImage image = new TopologyImage(epoch, Kind.TopologyImage);
-            image.update = update.cloneWithEquivalentEpoch(epoch);
+            TopologyImage image = new TopologyImage(epoch, Kind.Image, update.cloneWithEquivalentEpoch(epoch));
             image.closed = closed;
             image.retired = retired;
             return image;
         }
 
-        public TopologyImage asNoOp()
+        public TopologyImage asRepeat()
         {
-            TopologyImage image = new TopologyImage(epoch, Kind.NoOp);
+            TopologyImage image = new TopologyImage(epoch, Kind.Repeat, update);
             image.closed = closed;
             image.retired = retired;
             return image;
@@ -351,7 +308,13 @@ public interface AccordTopologyUpdate
         @Override
         public void applyTo(TopologyImage accumulator)
         {
-            Invariants.require(accumulator.epoch == epoch);
+            Invariants.require(accumulator.epoch == epoch, "Expected %d but got %d", epoch, accumulator.epoch);
+            if (kind() == Kind.Repeat)
+            {
+                accumulator.update = null;
+                return;
+            }
+
             Invariants.require(accumulator.update == null || accumulator.update.equals(update));
             accumulator.update = update;
             // We're iterating in _reverse_ order
@@ -403,7 +366,7 @@ public interface AccordTopologyUpdate
         @Override
         public Kind kind()
         {
-            return Kind.NewTopology;
+            return Kind.New;
         }
 
         @Override
@@ -412,6 +375,12 @@ public interface AccordTopologyUpdate
             Invariants.require(accumulator.epoch == epoch);
             Invariants.require(accumulator.update == null);
             accumulator.update = update;
+        }
+
+        @Override
+        public AccordTopologyUpdate asRepeat()
+        {
+            return new TopologyImage(epoch, Kind.Repeat, update);
         }
 
         @Override
@@ -430,65 +399,44 @@ public interface AccordTopologyUpdate
         }
     }
 
-    class Accumulator
-    extends AccordJournalValueSerializers.Accumulator<NavigableMap<Long, TopologyImage>, AccordTopologyUpdate>
+    class Accumulator implements AccordJournalValueSerializers.FlyweightImage
     {
+        TopologyImage read, write;
+
         public Accumulator()
         {
-            super(new TreeMap<>());
         }
 
         @Override
         public void reset(JournalKey key)
         {
-            accumulated = new TreeMap<>();
+            read = write = null;
         }
 
-        @Override
-        public void update(AccordTopologyUpdate newValue)
+        public TopologyImage read()
         {
-            super.update(newValue);
+            return read;
         }
 
-        public Iterator<ImmutableTopoloyImage> images()
+        public void read(AccordTopologyUpdate update)
         {
-            return map(get().values().iterator(), ImmutableTopoloyImage::new);
+            if (Objects.requireNonNull(update.kind()) == Kind.New)
+                read = new TopologyImage(update.epoch(), Kind.Image, update.getUpdate());
+            else
+                read = (TopologyImage) update;
+            write = read;
         }
 
-        @Override
-        protected NavigableMap<Long, TopologyImage> accumulate(NavigableMap<Long, TopologyImage> allEpochs, AccordTopologyUpdate update)
+        public void write(TopologyImage image)
         {
-            update.applyTo(allEpochs.computeIfAbsent(update.epoch(), v -> new TopologyImage(update.epoch(), Kind.TopologyImage)));
-            return allEpochs;
+            Invariants.require(write == read);
+            this.write = image;
         }
     }
 
-    static <FROM, TO> Iterator<TO> map(Iterator<FROM> iter, Function<FROM, TO> fn)
+    class FlyweightSerializer implements AccordJournalValueSerializers.FlyweightSerializer<AccordTopologyUpdate, Accumulator>
     {
-        return new Iterator<TO>()
-        {
-            public boolean hasNext()
-            {
-                return iter.hasNext();
-            }
-
-            public TO next()
-            {
-                return fn.apply(iter.next());
-            }
-        };
-    }
-
-    class AccumulatingSerializer
-    implements AccordJournalValueSerializers.FlyweightSerializer<AccordTopologyUpdate, Accumulator>
-    {
-        public static final AccumulatingSerializer defaultInstance = new AccumulatingSerializer(() -> 0);
-
-        private final EpochSupplier minEpoch;
-        public AccumulatingSerializer(EpochSupplier minEpoch)
-        {
-            this.minEpoch = minEpoch;
-        }
+        public FlyweightSerializer() {}
 
         @Override
         public Accumulator mergerFor()
@@ -499,44 +447,19 @@ public interface AccordTopologyUpdate
         @Override
         public void serialize(JournalKey key, AccordTopologyUpdate from, DataOutputPlus out, Version version) throws IOException
         {
-            out.writeUnsignedVInt32(1);
             Serializer.instance.serialize(from, out);
         }
 
         @Override
         public void reserialize(JournalKey key, Accumulator from, DataOutputPlus out, Version version) throws IOException
         {
-            out.writeUnsignedVInt32(from.get().size());
-            Journal.TopologyUpdate prev = null;
-            for (TopologyImage value : from.get().values())
-            {
-                Journal.TopologyUpdate tmp = value.update;
-                if (prev != null && value.update.isEquivalent(prev))
-                    value = value.asNoOp();
-
-                prev = tmp;
-                Serializer.instance.serialize(value, out);
-            }
+            serialize(key, from.write, out, version);
         }
 
         @Override
         public void deserialize(JournalKey key, Accumulator into, DataInputPlus in, Version version) throws IOException
         {
-            long minEpoch = this.minEpoch.epoch();
-            int count = in.readUnsignedVInt32();
-            AccordTopologyUpdate prev = null;
-            while (--count >= 0)
-            {
-                AccordTopologyUpdate update = Serializer.instance.deserialize(in);
-                if (update.kind() == Kind.NoOp)
-                {
-                    Invariants.require(prev != null);
-                    update = ((TopologyImage) update).asImage(prev.getUpdate());
-                }
-                if (update.epoch() >= minEpoch)
-                    into.update(update);
-                prev = update;
-            }
+            into.read(Serializer.instance.deserialize(in));
         }
     }
 }

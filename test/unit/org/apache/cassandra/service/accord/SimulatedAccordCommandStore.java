@@ -77,7 +77,6 @@ import accord.topology.Topology;
 import accord.topology.TopologyManager;
 import accord.utils.Gens;
 import accord.utils.RandomSource;
-import accord.utils.async.AsyncChains;
 import accord.utils.async.AsyncResult;
 import org.apache.cassandra.concurrent.ExecutorFactory;
 import org.apache.cassandra.concurrent.ScheduledExecutorPlus;
@@ -89,7 +88,6 @@ import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.compaction.CompactionManager;
 import org.apache.cassandra.db.filter.ColumnFilter;
 import org.apache.cassandra.db.memtable.Memtable;
-import org.apache.cassandra.metrics.AccordCacheMetrics;
 import org.apache.cassandra.schema.TableId;
 import org.apache.cassandra.service.accord.api.TokenKey;
 import org.apache.cassandra.tcm.ClusterMetadata;
@@ -101,6 +99,7 @@ import org.assertj.core.api.Assertions;
 import static org.apache.cassandra.config.DatabaseDescriptor.getPartitioner;
 import static org.apache.cassandra.db.ColumnFamilyStore.FlushReason.UNIT_TESTS;
 import static org.apache.cassandra.schema.SchemaConstants.ACCORD_KEYSPACE_NAME;
+import static org.apache.cassandra.service.accord.AccordService.getBlocking;
 import static org.apache.cassandra.utils.AccordGenerators.fromQT;
 
 public class SimulatedAccordCommandStore implements AutoCloseable
@@ -273,7 +272,7 @@ public class SimulatedAccordCommandStore implements AutoCloseable
                                                    }),
                                                    updateHolder,
                                                    journal,
-                                                   new AccordExecutorSimple(0, CommandStore.class.getSimpleName() + '[' + 0 + ']', new AccordCacheMetrics("test"), agent));
+                                                   new AccordExecutorSimple(0, CommandStore.class.getSimpleName() + '[' + 0 + ']', agent));
         this.commandStore.executor().executeDirectlyWithLock(() -> {
             commandStore.executor().setCapacity(8 << 20);
             commandStore.executor().setWorkingSetSize(4 << 20);
@@ -431,7 +430,7 @@ public class SimulatedAccordCommandStore implements AutoCloseable
     {
         var result = processAsync(loadCtx, function);
         processAll();
-        return AsyncChains.getBlocking(result);
+        return getBlocking(result);
     }
 
     public <T extends Reply> AsyncResult<T> processAsync(TxnRequest<T> request)
@@ -441,7 +440,7 @@ public class SimulatedAccordCommandStore implements AutoCloseable
 
     public <T extends Reply> AsyncResult<T> processAsync(PreLoadContext loadCtx, Function<? super SafeCommandStore, T> function)
     {
-        return commandStore.submit(loadCtx, function).beginAsResult();
+        return commandStore.submit(loadCtx, function);
     }
 
     public Pair<TxnId, AsyncResult<PreAccept.PreAcceptOk>> enqueuePreAccept(Txn txn, FullRoute<?> route)
@@ -465,7 +464,7 @@ public class SimulatedAccordCommandStore implements AutoCloseable
             var reply = br.apply(safe);
             Assertions.assertThat(reply.kind() == BeginRecovery.RecoverReply.Kind.Ok).isTrue();
             return (BeginRecovery.RecoverOk) reply;
-        }).beginAsResult());
+        }));
     }
 
     public void processAll()

@@ -120,6 +120,15 @@ public class AccordConfigurationService extends AbstractConfigurationService<Acc
         {
             return localSyncNotified;
         }
+
+        public void addDebugString(StringBuilder sb)
+        {
+            sb.append(" syncStatus ")
+              .append(syncStatus)
+              .append(" localSyncNotified ")
+              .append(localSyncNotified);
+            super.addDebugString(sb);
+        }
     }
 
     static class EpochHistory extends AbstractConfigurationService.AbstractEpochHistory<EpochState>
@@ -223,8 +232,6 @@ public class AccordConfigurationService extends AbstractConfigurationService<Acc
     void reportMetadataInternal(ClusterMetadata metadata)
     {
         Topology topology = AccordTopology.createAccordTopology(metadata);
-        if (topology.isEmpty() && isEmpty())
-            return;
 
         updateMapping(metadata);
         if (Invariants.isParanoid())
@@ -490,7 +497,9 @@ public class AccordConfigurationService extends AbstractConfigurationService<Acc
         if (epoch < minEpoch() || epochs.wasTruncated(epoch))
             return;
 
-        syncPropagator.reportClosed(epoch, mapping.nodes(), ranges);
+        Topology topology = getTopologyForEpoch(epoch);
+        if (topology != null)
+            syncPropagator.reportClosed(epoch, topology.nodes(), ranges);
     }
 
     @VisibleForTesting
@@ -507,7 +516,9 @@ public class AccordConfigurationService extends AbstractConfigurationService<Acc
 
         checkStarted();
         // TODO (expected): ensure we aren't fetching a truncated epoch; otherwise this should be non-null
-        syncPropagator.reportRetired(epoch, mapping.nodes(), ranges);
+        Topology topology = getTopologyForEpoch(epoch);
+        if (topology != null)
+            syncPropagator.reportRetired(epoch, topology.nodes(), ranges);
     }
 
     @Override
@@ -641,7 +652,7 @@ public class AccordConfigurationService extends AbstractConfigurationService<Acc
     public Future<Void> unsafeLocalSyncNotified(long epoch)
     {
         AsyncPromise<Void> promise = new AsyncPromise<>();
-        getOrCreateEpochState(epoch).localSyncNotified().begin((result, failure) -> {
+        getOrCreateEpochState(epoch).localSyncNotified().invoke((result, failure) -> {
             if (failure != null) promise.tryFailure(failure);
             else promise.trySuccess(result);
         });

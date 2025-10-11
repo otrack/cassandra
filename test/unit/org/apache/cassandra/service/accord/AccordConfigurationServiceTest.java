@@ -22,15 +22,14 @@ import java.net.UnknownHostException;
 import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
+import accord.api.Journal.TopologyUpdate;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
-import accord.api.Journal;
 import accord.impl.AbstractConfigurationServiceTest;
 import accord.local.Node.Id;
 import accord.topology.Topology;
@@ -63,7 +62,6 @@ import org.apache.cassandra.schema.TableId;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.schema.Tables;
 import org.apache.cassandra.service.accord.api.AccordAgent;
-import org.apache.cassandra.service.accord.journal.AccordTopologyUpdate;
 import org.apache.cassandra.tcm.ClusterMetadata;
 import org.apache.cassandra.tcm.ValidatingClusterMetadataService;
 import org.apache.cassandra.tcm.membership.Location;
@@ -180,7 +178,7 @@ public class AccordConfigurationServiceTest
                 public AsyncResult<Void> onTopologyUpdate(Topology topology, boolean isLoad, boolean startSync)
                 {
                     // Fake journal save
-                    journal_.saveTopology(new Journal.TopologyUpdate(new Int2ObjectHashMap<>(), topology), () -> {});
+                    journal_.saveTopology(new TopologyUpdate(new Int2ObjectHashMap<>(), topology), () -> {});
                     return super.onTopologyUpdate(topology, isLoad, startSync);
                 }
             };
@@ -205,10 +203,11 @@ public class AccordConfigurationServiceTest
             loaded.updateMapping(mappingForEpoch(cms.metadata().epoch.getEpoch() + 1));
             listener = new AbstractConfigurationServiceTest.TestListener(loaded, true);
             loaded.registerListener(listener);
-            Iterator<AccordTopologyUpdate.ImmutableTopoloyImage> iter = journal.replayTopologies();
+            journal_.closeCurrentSegmentForTestingIfNonEmpty();
+            List<TopologyUpdate> list = journal.replayTopologies();
             // Simulate journal replay
-            while (iter.hasNext())
-                loaded.reportTopology(iter.next().global);
+            for (TopologyUpdate update : list)
+                loaded.reportTopology(update.global);
             loaded.start();
 
             listener.assertTopologiesFor(1L, 2L, 3L);

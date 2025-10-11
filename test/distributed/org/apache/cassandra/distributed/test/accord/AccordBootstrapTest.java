@@ -62,10 +62,10 @@ import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
 import org.assertj.core.api.Assertions;
 
-import static accord.utils.async.AsyncChains.awaitUninterruptiblyAndRethrow;
 import static com.google.common.collect.Iterables.getOnlyElement;
 import static org.apache.cassandra.distributed.api.Feature.GOSSIP;
 import static org.apache.cassandra.distributed.api.Feature.NETWORK;
+import static org.apache.cassandra.service.accord.AccordService.getBlocking;
 
 public class AccordBootstrapTest extends TestBaseImpl
 {
@@ -124,8 +124,8 @@ public class AccordBootstrapTest extends TestBaseImpl
         {
             AccordConfigurationService configService = service().configService();
             boolean completed = configService.unsafeLocalSyncNotified(epoch).await(30, TimeUnit.SECONDS);
-            Assert.assertTrue(String.format("Local sync notification for epoch %s did not become ready within timeout on %s",
-                                            epoch, FBUtilities.getBroadcastAddressAndPort()), completed);
+            Assert.assertTrue(String.format("Local sync notification for epoch %s did not become ready within timeout on %s\n%s",
+                                            epoch, FBUtilities.getBroadcastAddressAndPort(), service().configService().getDebugStr()), completed);
         }
         catch (InterruptedException e)
         {
@@ -180,6 +180,8 @@ public class AccordBootstrapTest extends TestBaseImpl
                                                                   .set("accord.queue_shard_count", 2)
                                                                   .set("accord.shard_durability_cycle", "20s")
                                                                   .set("accord.shard_durability_target_splits", "1")
+                                                                  .set("accord.retry_syncpoint", "1s*attempts")
+                                                                  .set("accord.retry_durability", "1s*attempts")
                                                                   .with(NETWORK, GOSSIP))
                                       .start())
         {
@@ -190,10 +192,8 @@ public class AccordBootstrapTest extends TestBaseImpl
 
             for (IInvokableInstance node : cluster)
             {
-
                 node.runOnInstance(() -> {
                     Assert.assertEquals(initialMax, ClusterMetadata.current().epoch.getEpoch());
-                    System.out.println("Awaiting " + initialMax);
                     awaitEpoch(initialMax);
                     AccordConfigurationService configService = service().configService();
                     long minEpoch = configService.minEpoch();
@@ -278,7 +278,7 @@ public class AccordBootstrapTest extends TestBaseImpl
                         Assert.assertTrue(session.getNumKeyspaceTransfers() > 0);
                     });
 
-                    awaitUninterruptiblyAndRethrow(service().node().commandStores().forEach((PreLoadContext.Empty)()->"Test", safeStore -> {
+                    getBlocking(service().node().commandStores().forEach((PreLoadContext.Empty)()->"Test", safeStore -> {
                         AccordSafeCommandStore ss = (AccordSafeCommandStore) safeStore;
                         Assert.assertEquals(Timestamp.NONE, getOnlyElement(ss.bootstrapBeganAt().keySet()));
                         Assert.assertEquals(Timestamp.NONE, getOnlyElement(ss.safeToReadAt().keySet()));
@@ -321,7 +321,7 @@ public class AccordBootstrapTest extends TestBaseImpl
                         Assert.assertEquals(key, row.getInt("c"));
                         Assert.assertEquals(key, row.getInt("v"));
 
-                        awaitUninterruptiblyAndRethrow(service().node().commandStores().forEach((PreLoadContext.Empty)()->"Test", safeStore -> {
+                        getBlocking(service().node().commandStores().forEach((PreLoadContext.Empty)()->"Test", safeStore -> {
                             if (safeStore.ranges().currentRanges().contains(partitionKey))
                             {
                                 AccordSafeCommandStore ss = (AccordSafeCommandStore) safeStore;
@@ -464,7 +464,7 @@ public class AccordBootstrapTest extends TestBaseImpl
 
                             PartitionKey partitionKey = new PartitionKey(tableId, dk);
 
-                            awaitUninterruptiblyAndRethrow(service().node().commandStores().forEach((PreLoadContext.Empty)()->"Test",
+                            getBlocking(service().node().commandStores().forEach((PreLoadContext.Empty)()->"Test",
                                                                                           partitionKey.toUnseekable(), moveMax, moveMax,
                                                                                           safeStore -> {
                                 if (!safeStore.ranges().allAt(preMove).contains(partitionKey))

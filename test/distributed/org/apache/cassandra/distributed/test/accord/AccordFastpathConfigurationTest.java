@@ -16,12 +16,24 @@
  * limitations under the License.
  */
 
-package org.apache.cassandra.metrics;
+package org.apache.cassandra.distributed.test.accord;
 
-import com.codahale.metrics.Reservoir;
-import com.codahale.metrics.Snapshot;
+import java.io.IOException;
 
-public interface SnapshottingReservoir extends Reservoir
+import org.junit.Test;
+
+import org.apache.cassandra.distributed.Cluster;
+import org.apache.cassandra.distributed.test.TestBaseImpl;
+
+public class AccordFastpathConfigurationTest extends TestBaseImpl
 {
-    Snapshot getPercentileSnapshot();
+    @Test
+    public void testParameterized() throws IOException
+    {
+        try (Cluster cluster = init(Cluster.build(1)
+                                           .start()))
+        {
+            cluster.schemaChange(withKeyspace("create table %s.tbl (id int primary key) with transactional_mode='full' and fast_path={'size':55}"));
+        }
+    }
 }

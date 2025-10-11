@@ -258,6 +258,7 @@ public class AccordCacheEntry<K, V> extends IntrusiveLinkedListNode
         // TODO (expected): we aren't weighing the keys
         sizeOnHeap = Ints.saturatedCast(EMPTY_SIZE);
         parent.updateSize(sizeOnHeap, sizeOnHeap, false, false);
+        parent.objectSize.increment(EMPTY_SIZE);
     }
 
     @Override
@@ -333,6 +334,21 @@ public class AccordCacheEntry<K, V> extends IntrusiveLinkedListNode
             if (this.onSuccess == null)
                 this.onSuccess = new ArrayList<>();
             this.onSuccess.add(onSuccess);
+        }
+
+        static void notify(List<Runnable> onSuccess)
+        {
+            if (onSuccess != null)
+            {
+                onSuccess.forEach(run -> {
+                    try { run.run(); }
+                    catch (Throwable t)
+                    {
+                        Thread thread = Thread.currentThread();
+                        thread.getUncaughtExceptionHandler().uncaughtException(thread, t);
+                    }
+                });
+            }
         }
     }
 
@@ -505,8 +521,7 @@ public class AccordCacheEntry<K, V> extends IntrusiveLinkedListNode
             setStatus(LOADED);
             if (waitingToSave != null)
                 this.state = state;
-            if (identity.onSuccess != null)
-                identity.onSuccess.forEach(Runnable::run);
+            UniqueSave.notify(identity.onSuccess);
             return false;
         }
         else
@@ -520,6 +535,9 @@ public class AccordCacheEntry<K, V> extends IntrusiveLinkedListNode
 
     boolean saved(Object identity, Throwable fail)
     {
+        if (identity instanceof UniqueSave)
+            UniqueSave.notify(((UniqueSave) identity).onSuccess);
+
         if (!is(SAVING))
             return false;
 

@@ -27,11 +27,11 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
-import java.util.concurrent.Executor;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import accord.api.AsyncExecutor;
 import accord.api.Write;
 import accord.local.CommandStore;
 import accord.local.SafeCommandStore;
@@ -42,7 +42,6 @@ import accord.primitives.Seekable;
 import accord.primitives.Seekables;
 import accord.primitives.Timestamp;
 import accord.primitives.TxnId;
-import accord.primitives.Writes;
 import accord.utils.async.AsyncChain;
 import accord.utils.async.AsyncChains;
 import org.apache.cassandra.cql3.UpdateParameters;
@@ -139,13 +138,13 @@ public class TxnWrite extends AbstractKeySorted<TxnWrite.Update> implements Writ
                    '}';
         }
 
-        public AsyncChain<Void> write(Executor executor, TableMetadatas tables, boolean preserveTimestamps, long timestamp)
+        public AsyncChain<Void> write(AsyncExecutor executor, TableMetadatas tables, boolean preserveTimestamps, long timestamp)
         {
             PartitionUpdate update = deserialize(tables);
             if (!preserveTimestamps)
                 update = new PartitionUpdate.Builder(update, 0).updateAllTimestamp(timestamp).build();
             Mutation mutation = new Mutation(update, PotentialTxnConflicts.ALLOW);
-            return AsyncChains.ofRunnable(executor, () -> mutation.apply(false, false));
+            return executor.chain(() -> mutation.apply(false, false));
         }
 
         @Override
@@ -456,7 +455,7 @@ public class TxnWrite extends AbstractKeySorted<TxnWrite.Update> implements Writ
         // Accord should skip the Update for a read transaction, but handle it here anyways
         TxnUpdate txnUpdate = ((TxnUpdate)txn.update());
         if (txnUpdate == null)
-            return Writes.SUCCESS;
+            return AsyncChains.success(null);
 
         long timestamp = executeAt.uniqueHlc();
 
@@ -477,12 +476,12 @@ public class TxnWrite extends AbstractKeySorted<TxnWrite.Update> implements Writ
         }
 
         if (results.isEmpty())
-            return Writes.SUCCESS;
+            return AsyncChains.success(null);
 
         if (results.size() == 1)
-            return results.get(0).flatMap(o -> Writes.SUCCESS);
+            return results.get(0).mapToNull();
 
-        return AsyncChains.reduce(results, (i1, i2) -> null, (Void)null).flatMap(ignore -> Writes.SUCCESS);
+        return AsyncChains.reduce(results, (i1, i2) -> null, null);
     }
 
     public long estimatedSizeOnHeap()

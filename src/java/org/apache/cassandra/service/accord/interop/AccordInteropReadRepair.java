@@ -110,11 +110,8 @@ public class AccordInteropReadRepair extends ReadData
 
     private static final IVersionedSerializer<Data> noop_data_serializer = new IVersionedSerializer<>()
     {
-        @Override
-        public void serialize(Data t, DataOutputPlus out, Version version) throws IOException {}
-        @Override
-        public Data deserialize(DataInputPlus in, Version version) throws IOException { return Data.NOOP_DATA; }
-
+        @Override public void serialize(Data t, DataOutputPlus out, Version version) {}
+        @Override public Data deserialize(DataInputPlus in, Version version) { return Data.NOOP_DATA; }
         public long serializedSize(Data t, Version version) { return 0; }
     };
 
@@ -148,10 +145,10 @@ public class AccordInteropReadRepair extends ReadData
     protected AsyncChain<Data> beginRead(SafeCommandStore safeStore, Timestamp executeAt, PartialTxn txn, Participants<?> execute)
     {
         // TODO (required): subtract unavailable ranges, either from read or from response (or on coordinator)
-        return AsyncChains.ofCallable(Verb.READ_REPAIR_REQ.stage.executor(), () -> {
-                                          ReadRepairVerbHandler.instance.applyMutation(mutation);
-                                          return Data.NOOP_DATA;
-                                      });
+        return AsyncChains.chain(Verb.READ_REPAIR_REQ.stage.executor(), () -> {
+            ReadRepairVerbHandler.instance.applyMutation(mutation);
+            return Data.NOOP_DATA;
+        });
     }
 
     @Override
