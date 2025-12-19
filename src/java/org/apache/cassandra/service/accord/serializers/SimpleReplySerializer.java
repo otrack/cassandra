@@ -16,28 +16,12 @@
  * limitations under the License.
  */
 
-package org.apache.cassandra.service.accord;
+package org.apache.cassandra.service.accord.serializers;
 
-import javax.annotation.Nonnull;
+import accord.messages.SimpleReply;
+import org.apache.cassandra.io.UnversionedSerializer;
 
-import accord.impl.AbstractAsyncExecutor;
-
-import org.apache.cassandra.service.accord.api.AccordAgent;
-
-public class ImmediateAsyncExecutor implements AbstractAsyncExecutor
+public class SimpleReplySerializer
 {
-    public static final ImmediateAsyncExecutor INSTANCE = new ImmediateAsyncExecutor();
-
-    @Override
-    public void execute(@Nonnull Runnable command)
-    {
-        try
-        {
-            command.run();
-        }
-        catch (Throwable t)
-        {
-            AccordAgent.handleException(t);
-        }
-    }
+    public static final UnversionedSerializer<SimpleReply> reply = EncodeAsVInt32.withoutNulls(SimpleReply.class);
 }

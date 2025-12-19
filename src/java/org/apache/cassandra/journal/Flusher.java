@@ -17,6 +17,9 @@
  */
 package org.apache.cassandra.journal;
 
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.LockSupport;
 
@@ -102,17 +105,22 @@ final class Flusher<K, V>
         flushExecutor = executorFactory().infiniteLoop(flushExecutorName, new FlushRunnable(), SAFE, NON_DAEMON, SYNCHRONIZED);
     }
 
-    void shutdown() throws InterruptedException
+    void shutdownNow()
     {
-        logger.debug("Shutting down " + flushExecutor + " and awaiting termination");
-        flushExecutor.shutdown();
-        flushExecutor.awaitTermination(1, MINUTES);
+        logger.debug("Shutting down " + flushExecutor);
+        flushExecutor.shutdownNow();
         if (fsyncExecutor != null)
         {
-            logger.debug("Shutting down " + fsyncExecutor + " and awaiting termination");
+            logger.debug("Shutting down " + fsyncExecutor);
             fsyncExecutor.shutdownNow(); // `now` to interrupt potentially parked runnable
-            fsyncExecutor.awaitTermination(1, MINUTES);
         }
+    }
+
+    List<Interruptible> executors()
+    {
+        if (fsyncExecutor != null)
+            return Arrays.asList(flushExecutor, fsyncExecutor);
+        return Collections.singletonList(flushExecutor);
     }
 
     @Simulate(with={MONITORS,GLOBAL_CLOCK,LOCK_SUPPORT})
@@ -534,8 +542,8 @@ final class Flusher<K, V>
             {
                 signal.awaitThrowUncheckedOnInterrupt();
 
-                Journal.State state = journal.state.get();
-                Invariants.require(state == Journal.State.NORMAL,
+                Journal.State state = journal.getState();
+                Invariants.require(state != Journal.State.STOPPED_READABLE,
                                       "Thread %s outlived journal, which is in %s state", Thread.currentThread(), state);
             }
             else
