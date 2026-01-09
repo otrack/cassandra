@@ -124,6 +124,14 @@ public class TokenRange extends Range.EndInclusive
         return new org.apache.cassandra.dht.Range<>(left, right);
     }
 
+    public static TokenRange fromKeyspaceRange(TableId tableId, org.apache.cassandra.dht.Range<Token> range)
+    {
+        Token left = range.left, right = range.right;
+        TokenKey start = left.isMinimum() ? TokenKey.min(tableId, left.getPartitioner()) : new TokenKey(tableId, left);
+        TokenKey end = right.isMinimum() ? TokenKey.max(tableId, right.getPartitioner()) : new TokenKey(tableId, right);
+        return create(start, end);
+    }
+
     public static final Serializer serializer = new Serializer();
 
     public static final class Serializer implements UnversionedSerializer<TokenRange>

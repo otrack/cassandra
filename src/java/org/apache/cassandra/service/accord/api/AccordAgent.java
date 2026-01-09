@@ -186,7 +186,7 @@ public class AccordAgent implements Agent, OwnershipEventListener
         else
         {
             logger.error(message, phase, ranges, ". Retrying in " + retryDelayMicros + "us.", failure);
-            AccordService.instance().scheduler().once(() -> {
+            AccordService.unsafeInstance().scheduler().once(() -> {
                 logger.info("Retrying bootstrap of {}", ranges);
                 retry.run();
             }, retryDelayMicros, MICROSECONDS);

@@ -40,6 +40,10 @@ import accord.impl.progresslog.TxnState;
 import accord.local.MaxConflicts;
 import accord.local.MaxDecidedRX;
 import accord.local.RejectBefore;
+import accord.local.*;
+import accord.local.RedundantBefore.Bounds;
+import accord.local.RedundantStatus.Property;
+import accord.local.RedundantStatus.SomeStatus;
 import accord.primitives.SaveStatus;
 import accord.primitives.Status;
 
@@ -61,14 +65,6 @@ import accord.impl.AbstractReplayer.Mode;
 import accord.impl.AbstractSafeCommandStore.CommandStoreCaches;
 import accord.impl.DefaultLocalListeners;
 import accord.impl.progresslog.DefaultProgressLog;
-import accord.local.Command;
-import accord.local.CommandStore;
-import accord.local.CommandStores;
-import accord.local.CommandSummaries;
-import accord.local.NodeCommandStoreService;
-import accord.local.PreLoadContext;
-import accord.local.RedundantBefore;
-import accord.local.SafeCommandStore;
 import accord.local.cfk.CommandsForKey;
 import accord.primitives.PartialTxn;
 import accord.primitives.Range;
@@ -110,6 +106,8 @@ import static accord.impl.progresslog.DefaultProgressLog.ModeFlag.CATCH_UP;
 import static accord.local.RedundantStatus.Property.LOCALLY_APPLIED;
 import static accord.local.RedundantStatus.Property.LOCALLY_DURABLE_TO_COMMAND_STORE;
 import static accord.local.RedundantStatus.Property.LOCALLY_DURABLE_TO_DATA_STORE;
+import static accord.local.RedundantStatus.SomeStatus.LOCALLY_DURABLE_TO_COMMAND_STORE_ONLY;
+import static accord.local.RedundantStatus.SomeStatus.LOCALLY_DURABLE_TO_DATA_STORE_ONLY;
 import static accord.primitives.Status.Durability.HasOutcome.Universal;
 import static accord.utils.Invariants.require;
 import static org.apache.cassandra.config.DatabaseDescriptor.getAccord;
@@ -611,6 +609,28 @@ public class AccordCommandStore extends CommandStore
         ensureDurable(ranges, ReportDurable.of(onCommandStoreDurable));
     }
 
+    protected void ensureDurable()
+    {
+        RedundantBefore forCommandStore = nonDurable(unsafeGetRedundantBefore(), LOCALLY_DURABLE_TO_COMMAND_STORE, LOCALLY_DURABLE_TO_COMMAND_STORE_ONLY);
+        RedundantBefore forDataStore = nonDurable(unsafeGetRedundantBefore(), LOCALLY_DURABLE_TO_DATA_STORE, LOCALLY_DURABLE_TO_DATA_STORE_ONLY);
+        this.ensureDurable(forCommandStore.ranges(Objects::nonNull), forCommandStore);
+        dataStore.ensureDurable(this, forDataStore, 0);
+    }
+
+    private RedundantBefore nonDurable(RedundantBefore redundantBefore, Property durableProperty, SomeStatus durableStatus)
+    {
+        return redundantBefore.map(b -> {
+            if (b == null)
+                return null;
+
+            TxnId applied = b.maxBound(LOCALLY_APPLIED);
+            TxnId durable = b.maxBound(durableProperty);
+            if (applied.compareTo(durable) <= 0)
+                return null;
+            return Bounds.create(b.range, b.maxBound(LOCALLY_APPLIED), durableStatus, null);
+        });
+    }
+
     protected void ensureDurable(@Nullable Ranges ranges, ReportDurable onCommandStoreDurable)
     {
         if (node().isReplaying())
@@ -934,7 +954,7 @@ public class AccordCommandStore extends CommandStore
     {
         final TxnId journal, commandStore, dataStore;
 
-        public DurablyAppliedTo(RedundantBefore.Bounds bounds)
+        public DurablyAppliedTo(Bounds bounds)
         {
             this(bounds.maxBound(LOCALLY_APPLIED), bounds.maxBound(LOCALLY_DURABLE_TO_COMMAND_STORE), bounds.maxBound(LOCALLY_DURABLE_TO_DATA_STORE));
         }

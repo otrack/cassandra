@@ -3166,27 +3166,9 @@ public class StorageService extends NotificationBroadcasterSupport implements IE
         return new FutureTask<>(task);
     }
 
-    public RepairCoordinator repairAccordKeyspace(String keyspace, Collection<Range<Token>> ranges)
+    public RepairCoordinator newRepairCoordinator(String keyspace, RepairOption options)
     {
         int cmd = nextRepairCommand.incrementAndGet();
-        RepairOption options = new RepairOption(RepairParallelism.PARALLEL, // parallelism
-                                                false,                       // primaryRange
-                                                false,                      // incremental
-                                                false,                      // trace
-                                                5,                          // jobThreads
-                                                ranges,                     // ranges
-                                                true,                       // pullRepair
-                                                true,                       // forceRepair
-                                                PreviewKind.NONE,           // previewKind
-                                                false,                      // optimiseStreams
-                                                true,                       // ignoreUnreplicatedKeyspaces
-                                                true,                       // repairData
-                                                false,                      // repairPaxos
-                                                true,                       // dontPurgeTombstones
-                                                false,                      // repairAccord
-                                                false                       // permit no quorum
-        );
-
         return new RepairCoordinator(this, cmd, options, keyspace);
     }
 

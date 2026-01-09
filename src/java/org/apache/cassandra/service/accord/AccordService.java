@@ -55,6 +55,7 @@ import accord.impl.SizeOfIntersectionSorter;
 import accord.impl.progresslog.DefaultProgressLog;
 import accord.impl.progresslog.DefaultProgressLogs;
 import accord.local.Catchup;
+import accord.local.CatchupHard;
 import accord.local.CommandStores;
 import accord.local.Node;
 import accord.local.Node.Id;
@@ -86,6 +87,7 @@ import accord.utils.async.AsyncResults;
 
 import org.apache.cassandra.concurrent.Shutdownable;
 import org.apache.cassandra.config.AccordSpec;
+import org.apache.cassandra.config.AccordSpec.CatchupMode;
 import org.apache.cassandra.config.AccordSpec.JournalSpec.ReplaySavePoint;
 import org.apache.cassandra.config.CassandraRelevantProperties;
 import org.apache.cassandra.config.DatabaseDescriptor;
@@ -168,6 +170,9 @@ import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.apache.cassandra.concurrent.ExecutorFactory.Global.executorFactory;
 import static org.apache.cassandra.concurrent.ExecutorFactory.SimulatorThreadTag.JOB;
 import static org.apache.cassandra.concurrent.ExecutorFactory.SystemThreadTag.DAEMON;
+import static org.apache.cassandra.config.AccordSpec.CatchupMode.DISABLED;
+import static org.apache.cassandra.config.AccordSpec.CatchupMode.FALLBACK_TO_HARD;
+import static org.apache.cassandra.config.AccordSpec.CatchupMode.HARD;
 import static org.apache.cassandra.config.AccordSpec.JournalSpec.ReplayMode.RESET;
 import static org.apache.cassandra.config.DatabaseDescriptor.getAccord;
 import static org.apache.cassandra.config.DatabaseDescriptor.getAccordCommandStoreShardCount;
@@ -404,14 +409,14 @@ public class AccordService implements IAccordService, Shutdownable
 
         logger.info("Starting journal replay.");
         long start = nanoTime();
-        journal().replay(node.commandStores(), minSegments);
+        boolean success = journal().replay(node.commandStores(), minSegments);
         logger.info("Waiting for command stores to quiesce.");
         ((AccordCommandStores)node.commandStores()).waitForQuiescence();
         getBlocking(node.commandStores().forAll("Post Replay", safeStore -> ((AccordCommandStore)safeStore.commandStore()).rangeIndex().postReplay()));
 
         long end = nanoTime();
         logger.info("Finished journal replay. {}s elapsed", String.format("%.2f", NANOSECONDS.toMillis(end - start)/1000.0));
-        return true;
+        return success;
     }
 
     public static IAccordService instance()
@@ -480,6 +485,7 @@ public class AccordService implements IAccordService, Shutdownable
         if (state != State.INIT)
             return;
 
+        boolean rebootstrap = false;
         {
             long startMarker = ReplayMarkers.readStartMarker();
             long stopMarker = ReplayMarkers.readStopMarker();
@@ -490,8 +496,14 @@ public class AccordService implements IAccordService, Shutdownable
                     default: throw new UnhandledEnum(getAccord().journal.stopMarkerFailurePolicy);
                     case EXIT:
                         throw new RuntimeException("Stop marker is older than start marker (" + stopMarker + '<' + startMarker + ") , so cannot assume we have a complete log of our votes in any consensus groups. Exiting.");
+
                     case UNSAFE_STARTUP:
-                        logger.warn("Stop marker is older than start marker ({}<{}) , so cannot assume we have a complete log of our votes in any consensus groups. Continuing to startup as configured.", stopMarker, startMarker);
+                        logger.warn("Stop marker is older than start marker ({}<{}), so cannot assume we have a complete log of our votes in any consensus groups. Continuing to startup as configured.", stopMarker, startMarker);
+                        break;
+
+                    case REBOOTSTRAP:
+                        logger.info("Stop marker is older than start marker ({}<{}). Rebootstrapping.", stopMarker, startMarker);
+                        rebootstrap = true;
                 }
             }
         }
@@ -521,6 +533,7 @@ public class AccordService implements IAccordService, Shutdownable
             // this avoids a registered (not joined) node learning of topologies, then later restarting with some intervening
             // epochs having been garbage collected by the other nodes in the cluster
 
+            topologyService.onStartup(node);
             List<TopologyUpdate> images = journal.loadTopologies();
             TopologyUpdate last = images.isEmpty() ? null : images.get(images.size() - 1);
             boolean initialiseCommandStores = last != null && !last.commandStores.isEmpty();
@@ -528,13 +541,18 @@ public class AccordService implements IAccordService, Shutdownable
                 node.commandStores().initializeTopologyUnsafe(last);
 
             node.commandStores().forAllUnsafe(cs -> cs.unsafeProgressLog().stop());
-            // restore save points before we perform starting the journal so we can validate consistency between journal and save point state (where possible)
+
+            // restore save points before starting the journal so we can validate consistency between journal and save point state (where possible)
             Long2LongHashMap minSegments;
-            switch (getAccord().journal.replaySavePoint)
+            if (rebootstrap) minSegments = null;
+            else
             {
-                default: throw new UnhandledEnum(getAccord().journal.replaySavePoint);
-                case NO: minSegments = new Long2LongHashMap(0L); break;
-                case LATEST: minSegments = restoreFromSavePoints(node.commandStores());
+                switch (getAccord().journal.replaySavePoint)
+                {
+                    default: throw new UnhandledEnum(getAccord().journal.replaySavePoint);
+                    case NO: minSegments = new Long2LongHashMap(0L); break;
+                    case LATEST: minSegments = restoreFromSavePoints(node.commandStores());
+                }
             }
 
             // now start the journal before we replay, as replay may trigger its own new journal writes
@@ -547,15 +565,23 @@ public class AccordService implements IAccordService, Shutdownable
                     node.topology().reportTopology(image.global);
             }
 
-            replayJournal(minSegments);
             node.commandStores().forAllUnsafe(cs -> cs.unsafeProgressLog().start());
-            // TODO (expected): after restart, trigger ensureDurable as we ignore during replay
-            //  (or else decide during replay if any given call should be ignored)
+            if (rebootstrap)
+            {
+                // rebootstrap expects the durability service to process visibility sync points for command stores
+                node.durability().start();
+                getBlocking(node.commandStores().rebootstrap(node));
+            }
+            else
+            {
+                replayJournal(minSegments);
+            }
         }
         finally
         {
             node.unsafeSetReplaying(false);
         }
+        node.commandStores().forAllUnsafe(commandStore -> ((AccordCommandStore)commandStore).ensureDurable());
     }
 
     private Long2LongHashMap restoreFromSavePoints(CommandStores commandStores)
@@ -590,26 +616,29 @@ public class AccordService implements IAccordService, Shutdownable
         state = State.STARTED;
         node.commandStores().forAll("", safeStore -> safeStore.progressLog().start());
 
-        // trigger catchup only after our progress mechanisms are initialised
-        catchup();
-
         node.durability().shards().reconfigure(Ints.checkedCast(getAccordShardDurabilityTargetSplits()),
                                                Ints.checkedCast(getAccordShardDurabilityMaxSplits()),
                                                Ints.checkedCast(getAccordShardDurabilityCycle(SECONDS)), SECONDS);
         node.durability().global().setGlobalCycleTime(Ints.checkedCast(getAccordGlobalDurabilityCycle(SECONDS)), SECONDS);
+
+        // trigger catchup only after our progress mechanisms are initialised
+        catchup();
+
         // Only enable durability scheduling and progress logs _after_ we have fully replayed journal
-        node.durability().start();
+        if (!node.durability().isStarted())
+            node.durability().start();
     }
 
     void catchup()
     {
         AccordSpec spec = DatabaseDescriptor.getAccord();
-        if (!spec.catchup_on_start)
+        if (spec.catchup_on_start == DISABLED)
         {
             logger.info("Catchup disabled; continuing to startup");
             return;
         }
 
+        CatchupMode mode = spec.catchup_on_start;
         BootstrapState bootstrapState = SystemKeyspace.getBootstrapState();
         if (bootstrapState == COMPLETED)
         {
@@ -620,10 +649,21 @@ public class AccordService implements IAccordService, Shutdownable
                 int attempts = 1;
                 while (true)
                 {
-                    logger.info("Catchup with quorum...");
+                    logger.info("Catchup ({}) with quorum...", mode);
                     long start = nanoTime();
                     long failAt = start + maxLatencyNanos;
-                    Future<Void> f = toFuture(Catchup.catchup(node));
+                    Future<Void> f;
+                    {
+                        AsyncChain<Void> submit;
+                        if (mode == HARD)
+                        {
+                            if (!node.durability().isStarted())
+                                node.durability().start();
+                            submit = CatchupHard.catchup(node);
+                        }
+                        else submit = Catchup.catchup(node);
+                        f = toFuture(submit);
+                    }
                     if (!f.awaitUntilThrowUncheckedOnInterrupt(failAt))
                     {
                         if (spec.catchup_on_start_exit_on_failure)
@@ -665,6 +705,8 @@ public class AccordService implements IAccordService, Shutdownable
                     }
 
                     logger.info("Catchup was slow, so we may behind again; retrying");
+                    if (mode == FALLBACK_TO_HARD)
+                        mode = HARD;
                 }
             }
             finally
@@ -1160,7 +1202,7 @@ public class AccordService implements IAccordService, Shutdownable
                 else if (!save.getNow())
                     logger.error("Failed to write some safe replay markers");
                 else
-                    logger.info("Written safe replay markers to {}", save);
+                    logger.info("Written safe replay markers");
             }
 
             commandStores.shutdownExecutors();

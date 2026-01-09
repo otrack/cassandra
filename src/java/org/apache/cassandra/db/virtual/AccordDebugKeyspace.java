@@ -36,6 +36,7 @@ import java.util.concurrent.TimeoutException;
 import java.util.function.BiConsumer;
 import java.util.function.Function;
 import java.util.function.IntFunction;
+import java.util.function.Supplier;
 import java.util.function.UnaryOperator;
 import java.util.stream.Collectors;
 
@@ -61,6 +62,7 @@ import accord.impl.CommandChange;
 import accord.impl.progresslog.DefaultProgressLog;
 import accord.impl.progresslog.DefaultProgressLog.ModeFlag;
 import accord.impl.progresslog.TxnStateKind;
+import accord.local.CatchupHard;
 import accord.local.Cleanup;
 import accord.local.Command;
 import accord.local.CommandStore;
@@ -2021,6 +2023,8 @@ public class AccordDebugKeyspace extends VirtualKeyspace
             UNSET_PROGRESS_LOG_MODE("Unset the specified progress log mode."),
             TRY_EXECUTE_LISTENING("Try to execute all of the transactions (and their dependencies) that have registered listeners on other transactions."),
             REPLAY("Run journal replay for all transactions"),
+            REBOOTSTRAP("Rebootstrap the command store. This invalidates the local journal, synchronises its data via data repair and rejoins the distributed state machine."),
+            HARD_CATCHUP("Hard catchup the command store. This invalidates the local journal for any ranges not up to date with some quorum, synchronises its data via data repair and rejoins the distributed state machine."),
             ;
 
             final String description;
@@ -2072,12 +2076,16 @@ public class AccordDebugKeyspace extends VirtualKeyspace
             if (op == null)
                 throw new IllegalArgumentException("Must specify 'op'");
 
+            final AccordService accord = (AccordService) AccordService.unsafeInstance();
+            final Node node = accord.node();
             final Function<CommandStore, AsyncResult<?>> function;
+            Supplier<AsyncResult<?>> allFunction = null;
             switch (op)
             {
                 default: throw new UnhandledEnum(op);
                 case SET_PROGRESS_LOG_MODE:
                 case UNSET_PROGRESS_LOG_MODE:
+                {
                     if (param == null)
                         throw new IllegalArgumentException("Must specify 'param' for " + op);
                     ModeFlag mode = tryParse(param, true, ModeFlag.class, ModeFlag::valueOf);
@@ -2089,32 +2097,50 @@ public class AccordDebugKeyspace extends VirtualKeyspace
                         return AsyncResults.success(null);
                     };
                     break;
+                }
                 case TRY_EXECUTE_LISTENING:
+                {
                     if (param != null)
                         throw new IllegalArgumentException("'param' is not supported for " + op);
                     function = CommandStore::operatorTryToExecuteListeningTxns;
                     break;
+                }
                 case REPLAY:
+                {
                     ReplayMode replayMode = tryParse(param, true, ReplayMode.class, ReplayMode::valueOf);
                     function = commandStore -> {
-                        ((AccordService)AccordService.unsafeInstance()).journal().replay(commandStore, replayMode, 0L);
+                        accord.journal().replay(commandStore, replayMode, 0L);
                         return AsyncResults.success(null);
                     };
+                    break;
+                }
+                case REBOOTSTRAP:
+                    allFunction = () -> node.commandStores().rebootstrap(node);
+                    function = commandStore -> commandStore.rebootstrap(node);
+                    break;
+                case HARD_CATCHUP:
+                    allFunction = () -> CatchupHard.catchup(node, Arrays.asList(node.commandStores().all())).beginAsResult();
+                    function = commandStore -> CatchupHard.catchup(node, Collections.singletonList(commandStore)).beginAsResult();
                     break;
             }
 
             AsyncResult<?> result;
             if (commandStoreId < 0)
             {
-                List<AsyncResult<?>> results = new ArrayList<>();
-                AccordService.unsafeInstance().node()
-                             .commandStores()
-                             .forAllUnsafe(commandStore -> results.add(function.apply(commandStore)));
-                result = AsyncResults.allOf(results);
+                if (allFunction == null)
+                {
+                    allFunction = () -> {
+                        List<AsyncResult<?>> results = new ArrayList<>();
+                        for (CommandStore commandStore : node.commandStores().all())
+                            results.add(function.apply(commandStore));
+                        return AsyncResults.allOf(results);
+                    };
+                }
+                result = allFunction.get();
             }
             else
             {
-                result = function.apply(AccordService.unsafeInstance().node().commandStores().forId(commandStoreId));
+                result = function.apply(node.commandStores().forId(commandStoreId));
             }
 
             AccordService.getBlocking(result);

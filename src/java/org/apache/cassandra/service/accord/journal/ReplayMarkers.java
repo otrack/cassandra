@@ -30,7 +30,6 @@ import static org.apache.cassandra.config.DatabaseDescriptor.getAccordJournalDir
 
 public class ReplayMarkers
 {
-
     public static File startMarker()
     {
         return new File(getAccordJournalDirectory(), "started");

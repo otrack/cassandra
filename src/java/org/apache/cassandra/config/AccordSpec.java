@@ -28,6 +28,7 @@ import org.apache.cassandra.journal.Params;
 import org.apache.cassandra.service.accord.serializers.Version;
 import org.apache.cassandra.service.consensus.TransactionalMode;
 
+import static org.apache.cassandra.config.AccordSpec.CatchupMode.NORMAL;
 import static org.apache.cassandra.config.AccordSpec.QueueShardModel.THREAD_POOL_PER_SHARD;
 import static org.apache.cassandra.config.AccordSpec.QueueSubmissionModel.SYNC;
 import static org.apache.cassandra.config.AccordSpec.RangeIndexMode.in_memory;
@@ -157,8 +158,8 @@ public class AccordSpec
 
     public volatile DurationSpec.IntSecondsBound fast_path_update_delay = null;
 
-    public volatile int shard_durability_target_splits = 16;
-    public volatile int shard_durability_max_splits = 128;
+    public volatile int shard_durability_target_splits = 8;
+    public volatile int shard_durability_max_splits = 64;
     public volatile DurationSpec.IntSecondsBound durability_txnid_lag = new DurationSpec.IntSecondsBound(5);
     public volatile DurationSpec.IntSecondsBound shard_durability_cycle = new DurationSpec.IntSecondsBound(5, TimeUnit.MINUTES);
     public volatile DurationSpec.IntSecondsBound global_durability_cycle = new DurationSpec.IntSecondsBound(5, TimeUnit.MINUTES);
@@ -176,6 +177,21 @@ public class AccordSpec
      */
     public volatile TransactionalRangeMigration range_migration = TransactionalRangeMigration.auto;
 
+    public enum RebootstrapMode
+    {
+        full_repair, truncate_and_stream
+    }
+
+    public enum CatchupMode
+    {
+        DISABLED,
+        NORMAL,
+        FALLBACK_TO_HARD,
+        HARD
+    }
+
+    public RebootstrapMode rebootstrap_mode = RebootstrapMode.full_repair;
+
     /**
      * default transactional mode for tables created by this node when no transactional mode has been specified in the DDL
      */
@@ -188,7 +204,7 @@ public class AccordSpec
     public int catchup_on_start_max_attempts = 5;
     // TODO (required): roll this back to catchup_on_start_exit_on_failure: true
     public boolean catchup_on_start_exit_on_failure = false;
-    public boolean catchup_on_start = true;
+    public CatchupMode catchup_on_start = NORMAL;
     public DurationSpec.IntSecondsBound shutdown_grace_period = new DurationSpec.IntSecondsBound(15 * 60);
 
     public enum RangeIndexMode { in_memory, journal_sai }
@@ -211,6 +227,7 @@ public class AccordSpec
              * Replay all journal entries and erase local state such as CommandsForKey that can be recreated
              */
             RESET,
+
             /**
              * Replay all journal entries
              */
@@ -235,11 +252,10 @@ public class AccordSpec
             LATEST
         }
 
-        // TODO (required): add REBOOTSTRAP
         public enum StopMarkerFailurePolicy
         {
             /**
-             * If the start marker exceeds the stop marker exit, since we cannot guarantee our consensus log is complete.
+             * If the start marker exceeds the stop marker then exit, since we cannot guarantee our consensus log is complete.
              */
             EXIT,
 
@@ -247,7 +263,9 @@ public class AccordSpec
              * If the start marker exceeds the stop marker startup, assuming the consensus log has been determined complete externally.
              * Note this is VERY UNSAFE if you care about isolation guarantees.
              */
-            UNSAFE_STARTUP
+            UNSAFE_STARTUP,
+
+            REBOOTSTRAP
         }
 
         public int segmentSize = 32 << 20;

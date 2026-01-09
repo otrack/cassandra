@@ -66,7 +66,7 @@ public class JournalAccessRouteIndexOnStartupRaceTest extends TestBaseImpl
     public void test() throws IOException
     {
         try (Cluster cluster = Cluster.build(1)
-                                      .withConfig(config -> config.set("accord.catchup_on_start", "false"))
+                                      .withConfig(config -> config.set("accord.catchup_on_start", "DISABLED"))
                                       .withInstanceInitializer(BBHelper::install).start())
         {
             IInvokableInstance node = cluster.get(1);

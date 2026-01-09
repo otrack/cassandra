@@ -87,15 +87,16 @@ class AccordDurableOnFlush implements BiConsumer<Long, TableMetadata>
         {
             return new ReportDurable(RedundantBefore.EMPTY, COMMAND_STORE_FLUSH);
         }
-//
-//        public static ReportDurable dataStoreFlush()
-//        {
-//            return new ReportDurable(RedundantBefore.EMPTY, DATA_STORE_FLUSH);
-//        }
-//
+
         static ReportDurable merge(ReportDurable a, ReportDurable b)
         {
             return new ReportDurable(RedundantBefore.merge(a.redundantBefore, b.redundantBefore), a.flags | b.flags);
+        }
+
+        @Override
+        public String toString()
+        {
+            return redundantBefore.toString();
         }
     }
 
