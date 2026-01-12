@@ -28,13 +28,14 @@ import org.slf4j.LoggerFactory;
 
 import accord.impl.AbstractReplayer;
 import accord.local.CommandStore;
-import accord.local.CommandStores;
 import accord.primitives.Route;
 import accord.primitives.TxnId;
 import accord.utils.Invariants;
+import accord.utils.UnhandledEnum;
 import org.agrona.collections.Int2ObjectHashMap;
 import org.agrona.collections.IntArrayList;
 import org.agrona.collections.Long2LongHashMap;
+import org.apache.cassandra.config.AccordSpec.JournalSpec.ReplayMode;
 import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.journal.Journal;
 import org.apache.cassandra.service.accord.AccordCommandStore;
@@ -52,8 +53,23 @@ public class Replay
 {
     private static final Logger logger = LoggerFactory.getLogger(Replay.class);
 
-    static boolean replay(AccordJournal journal, CommandStores commandStores, Object param)
+    static boolean replay(AccordJournal journal, ReplayMode replayMode, CommandStore[] commandStores, Object param)
     {
+        AbstractReplayer.Mode accordReplayerMode;
+        switch (replayMode)
+        {
+            default: throw new UnhandledEnum(replayMode);
+            case NON_DURABLE:
+                accordReplayerMode = AbstractReplayer.Mode.NON_DURABLE;
+                throw new UnsupportedOperationException("Not yet safe to use NON_DURABLE ReplayMode");
+            case PART_NON_DURABLE:
+                accordReplayerMode = AbstractReplayer.Mode.PART_NON_DURABLE;
+                break;
+            case ALL:
+            case RESET:
+                accordReplayerMode = AbstractReplayer.Mode.ALL;
+        }
+
         Invariants.require(param == null || param.getClass() == Long2LongHashMap.class, "Param should be null or a map of commandStoreId->minSegmentId");
         final Long2LongHashMap minSegments = param == null ? new Long2LongHashMap(0L) : (Long2LongHashMap) param;
 
@@ -65,7 +81,7 @@ public class Replay
         final int commandStoreParallelism = Math.max(Math.max(1, Math.min(getAvailableProcessors(), 4)), getAvailableProcessors() / 4);
         final AtomicBoolean abort = new AtomicBoolean();
         final IntArrayList activeCommandStoreIds = new IntArrayList();
-        final ReplayQueue pendingCommandStores = new ReplayQueue(commandStores.all());
+        final ReplayQueue pendingCommandStores = new ReplayQueue(commandStores);
 
         class ReplayStream implements Closeable
         {
@@ -77,7 +93,7 @@ public class Replay
             public ReplayStream(CommandStore commandStore, long minSegment)
             {
                 this.commandStore = commandStore;
-                this.replayer = (AbstractReplayer) commandStore.replayer();
+                this.replayer = (AbstractReplayer) commandStore.replayer(accordReplayerMode);
                 // Keys in the index are sorted by command store id, so index iteration will be sequential
                 this.iter = journal.keyIterator(new JournalKey(replayer.minReplay.withoutNonIdentityFlags(), COMMAND_DIFF, commandStore.id()), new JournalKey(TxnId.MAX.withoutNonIdentityFlags(), COMMAND_DIFF, commandStore.id()), false, minSegment);
                 logger.info("Beginning replay of {} with min={}, {}", commandStore, replayer.minReplay,

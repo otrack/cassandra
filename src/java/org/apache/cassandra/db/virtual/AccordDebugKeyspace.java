@@ -105,6 +105,7 @@ import accord.utils.async.AsyncChains;
 import accord.utils.async.AsyncResult;
 import accord.utils.async.AsyncResults;
 
+import org.apache.cassandra.config.AccordSpec.JournalSpec.ReplayMode;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.statements.schema.CreateTableStatement;
 import org.apache.cassandra.db.ColumnFamilyStore;
@@ -135,7 +136,6 @@ import org.apache.cassandra.service.accord.AccordCacheEntry;
 import org.apache.cassandra.service.accord.AccordCommandStore;
 import org.apache.cassandra.service.accord.AccordCommandStores;
 import org.apache.cassandra.service.accord.AccordExecutor;
-import org.apache.cassandra.service.accord.journal.AccordJournal;
 import org.apache.cassandra.service.accord.AccordKeyspace;
 import org.apache.cassandra.service.accord.AccordOperations;
 import org.apache.cassandra.service.accord.AccordService;
@@ -153,6 +153,7 @@ import org.apache.cassandra.service.accord.debug.DebugTxnDepsAll;
 import org.apache.cassandra.service.accord.debug.DebugTxnDepsOrdered;
 import org.apache.cassandra.service.accord.debug.DebugTxnGraph;
 import org.apache.cassandra.service.accord.debug.TxnKindsAndDomains;
+import org.apache.cassandra.service.accord.journal.AccordJournal;
 import org.apache.cassandra.service.consensus.migration.ConsensusMigrationState;
 import org.apache.cassandra.service.consensus.migration.TableMigrationState;
 import org.apache.cassandra.tcm.ClusterMetadata;
@@ -2019,6 +2020,7 @@ public class AccordDebugKeyspace extends VirtualKeyspace
             SET_PROGRESS_LOG_MODE("Set the specified progress log mode."),
             UNSET_PROGRESS_LOG_MODE("Unset the specified progress log mode."),
             TRY_EXECUTE_LISTENING("Try to execute all of the transactions (and their dependencies) that have registered listeners on other transactions."),
+            REPLAY("Run journal replay for all transactions"),
             ;
 
             final String description;
@@ -2091,6 +2093,13 @@ public class AccordDebugKeyspace extends VirtualKeyspace
                     if (param != null)
                         throw new IllegalArgumentException("'param' is not supported for " + op);
                     function = CommandStore::operatorTryToExecuteListeningTxns;
+                    break;
+                case REPLAY:
+                    ReplayMode replayMode = tryParse(param, true, ReplayMode.class, ReplayMode::valueOf);
+                    function = commandStore -> {
+                        ((AccordService)AccordService.unsafeInstance()).journal().replay(commandStore, replayMode, 0L);
+                        return AsyncResults.success(null);
+                    };
                     break;
             }
 

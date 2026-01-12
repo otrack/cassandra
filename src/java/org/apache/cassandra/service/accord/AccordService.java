@@ -93,6 +93,7 @@ import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.ConsistencyLevel;
 import org.apache.cassandra.db.SystemKeyspace;
 import org.apache.cassandra.db.SystemKeyspace.BootstrapState;
+import org.apache.cassandra.db.compaction.CompactionManager;
 import org.apache.cassandra.exceptions.RequestExecutionException;
 import org.apache.cassandra.journal.Descriptor;
 import org.apache.cassandra.journal.Params;
@@ -161,6 +162,7 @@ import static accord.local.durability.DurabilityService.SyncRemote.All;
 import static accord.messages.SimpleReply.Ok;
 import static accord.primitives.Txn.Kind.ExclusiveSyncPoint;
 import static accord.primitives.Txn.Kind.Write;
+import static java.util.concurrent.TimeUnit.MINUTES;
 import static java.util.concurrent.TimeUnit.NANOSECONDS;
 import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.apache.cassandra.concurrent.ExecutorFactory.Global.executorFactory;
@@ -493,6 +495,14 @@ public class AccordService implements IAccordService, Shutdownable
                 }
             }
         }
+
+        logger.info("Starting background compaction of system_accord");
+        // We control this ourselves to ensure it starts when we need it, as especially commands_for_key
+        // can accumulate a lot of state and degrade replay performance significantly
+        scheduler.recurring(() -> {
+            CompactionManager.instance.submitBackground(AccordColumnFamilyStores.commandsForKey);
+            CompactionManager.instance.submitBackground(AccordColumnFamilyStores.journal);
+        }, 1L, MINUTES);
 
         state = State.STARTING;
         node.unsafeSetReplaying(true);
@@ -1093,15 +1103,16 @@ public class AccordService implements IAccordService, Shutdownable
         if (state == State.INIT)
             return;
 
+        logger.info("Stopping Accord");
         requestInstance = replyInstance = null;
         node.durability().stop();
         // TODO (expected): stop TopologyManager from reporting new topologies
         topologyService.shutdown();
-        scheduler.shutdownNow();
         AccordCommandStores commandStores = (AccordCommandStores)node.commandStores();
         Set<TableId> tableIds = commandStores.shutdownStores();
         commandStores.waitForQuiescence();
         journal.writeStopMarker();
+        scheduler.shutdownNow();
         toFuture(flushCaches()).map(ignore -> {
             return AccordColumnFamilyStores.commandsForKey.forceFlush(DRAIN);
         });
@@ -1111,7 +1122,9 @@ public class AccordService implements IAccordService, Shutdownable
             if (cfs != null)
                 cfs.forceFlush(DRAIN);
         }
+
         state = State.STOPPED;
+        logger.info("Stopped Accord");
     }
 
     @Override
@@ -1123,6 +1136,7 @@ public class AccordService implements IAccordService, Shutdownable
         if (state.compareTo(State.STOPPED) < 0)
             stop();
 
+        logger.info("Shutting down Accord");
         state = State.SHUTTING_DOWN;
         long deadlineNanos = nanoTime() + DatabaseDescriptor.getAccord().shutdown_grace_period.toDuration().toNanos();
         executorFactory().startThread("ShutdownAccord", () -> {
@@ -1152,6 +1166,7 @@ public class AccordService implements IAccordService, Shutdownable
             commandStores.shutdownExecutors();
             state = State.SHUTDOWN;
             isShutdown.signalAll();
+            logger.info("Accord Shutdown");
         }, DAEMON, JOB);
     }
 

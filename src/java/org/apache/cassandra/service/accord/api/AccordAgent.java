@@ -295,10 +295,19 @@ public class AccordAgent implements Agent, OwnershipEventListener
     public long slowCoordinatorDelay(Node node, SafeCommandStore safeStore, TxnId txnId, TimeUnit units, int attempt)
     {
         SafeCommand safeCommand = safeStore.unsafeGetNoCleanup(txnId);
-        Invariants.nonNull(safeCommand);
+        if (safeCommand == null)
+        {
+            noSpamLogger.warn("{} invoked slowCoordinatorDelay for {} without having it in cache", safeStore.commandStore(), txnId, new RuntimeException());
+            return recover(txnId).computeWait(attempt, units);
+        }
 
         Command command = safeCommand.current();
-        Invariants.nonNull(command);
+        if (command == null)
+        {
+            noSpamLogger.warn("{} invoked slowCoordinatorDelay for {} without knowing the command", safeStore.commandStore(), txnId, new RuntimeException());
+            return recover(txnId).computeWait(attempt, units);
+        }
+
 
         // TODO (expected): make this a configurable calculation on normal request latencies (like ContentionStrategy)
         long nowMicros = MILLISECONDS.toMicros(Clock.Global.currentTimeMillis());
@@ -368,7 +377,20 @@ public class AccordAgent implements Agent, OwnershipEventListener
     @Override
     public long slowReplicaDelay(Node node, SafeCommandStore safeStore, TxnId txnId, int attempt, BlockedUntil blockedUntil, TimeUnit units)
     {
-        Command command = Invariants.nonNull(safeStore.unsafeGetNoCleanup(txnId).current());
+        SafeCommand safeCommand = safeStore.unsafeGetNoCleanup(txnId);
+        if (safeCommand == null)
+        {
+            noSpamLogger.warn("{} invoked slowReplicaDelay for {} without having it in cache", safeStore.commandStore(), txnId, new RuntimeException());
+            return fetch(txnId).computeWait(attempt, units);
+        }
+
+        Command command = safeCommand.current();
+        if (command == null)
+        {
+            noSpamLogger.warn("{} invoked slowReplicaDelay for {} without knowing the command", safeStore.commandStore(), txnId, new RuntimeException());
+            return fetch(txnId).computeWait(attempt, units);
+        }
+
         long nowMicros = MILLISECONDS.toMicros(Clock.Global.currentTimeMillis());
         long mostRecentStart = mostRecentStart(command, nowMicros);
         long waitMicros = fetch(txnId).computeWait(attempt, units);

@@ -33,7 +33,10 @@ import com.google.common.annotations.VisibleForTesting;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.cassandra.config.DatabaseDescriptor;
+import accord.local.CommandStore;
+import org.agrona.collections.Long2LongHashMap;
+import org.apache.cassandra.config.AccordSpec.JournalSpec;
+import org.apache.cassandra.config.AccordSpec.JournalSpec.ReplayMode;
 import org.apache.cassandra.db.marshal.LongType;
 import org.apache.cassandra.io.util.*;
 
@@ -73,6 +76,7 @@ import static accord.api.Journal.Load.MINIMAL;
 import static accord.api.Journal.Load.MINIMAL_WITH_DEPS;
 import static accord.local.Cleanup.Input.FULL;
 import static org.apache.cassandra.config.AccordSpec.RangeIndexMode.journal_sai;
+import static org.apache.cassandra.config.DatabaseDescriptor.getAccord;
 import static org.apache.cassandra.config.DatabaseDescriptor.getAccordJournalDirectory;
 import static org.apache.cassandra.service.accord.journal.ReplayMarkers.startMarker;
 import static org.apache.cassandra.service.accord.journal.ReplayMarkers.stopMarker;
@@ -558,7 +562,7 @@ public class AccordJournal implements accord.api.Journal, RangeSearcher.Supplier
     {
         if (rangeSearch == null)
         {
-            Invariants.require(DatabaseDescriptor.getAccord().range_index_mode != journal_sai, "range_index_mode is journal_sai, but the storage attached index was not found on initialisation");
+            Invariants.require(getAccord().range_index_mode != journal_sai, "range_index_mode is journal_sai, but the storage attached index was not found on initialisation");
             return new SegmentCompactor<>(userVersion, cfs);
         }
 
@@ -578,10 +582,19 @@ public class AccordJournal implements accord.api.Journal, RangeSearcher.Supplier
         forceCompaction();
     }
 
+    public void replay(CommandStore commandStore, ReplayMode replayMode, long minSegmentId)
+    {
+        Long2LongHashMap minSegments = new Long2LongHashMap(0);
+        minSegments.put(commandStore.id(), minSegmentId);
+        Replay.replay(this, replayMode, new CommandStore[] {commandStore }, null);
+    }
+
     @Override
     public boolean replay(CommandStores commandStores, Object param)
     {
-        return Replay.replay(this, commandStores, param);
+        ReplayMode mode = params instanceof JournalSpec ? ((JournalSpec)params).replay
+                                                        : getAccord().journal.replay;
+        return Replay.replay(this, mode, commandStores.all(), param);
     }
 
     @Override

@@ -408,8 +408,16 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean, Memtable.Owner
     {
         return () -> {
             for (Keyspace keyspace : Keyspace.all())
+            {
                 for (ColumnFamilyStore cfs : keyspace.getColumnFamilyStores())
+                {
+                    if (SchemaConstants.ACCORD_KEYSPACE_NAME.equals(cfs.keyspace.getName()))
+                        continue;
+
                     CompactionManager.instance.submitBackground(cfs);
+                }
+            }
+
         };
     }
 

@@ -1124,7 +1124,8 @@ public abstract class AccordTask<R> extends SubmittableTask implements Function<
 
         void cleanup(Caches caches)
         {
-            loader.cleanupExclusive(caches);
+            if (loader != null)
+                loader.cleanupExclusive(caches);
         }
 
         CommandSummaries finish(Caches caches)

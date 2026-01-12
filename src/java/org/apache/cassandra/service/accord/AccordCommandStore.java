@@ -106,6 +106,7 @@ import org.apache.cassandra.utils.concurrent.Condition;
 
 import static accord.api.Journal.CommandUpdate;
 import static accord.api.Journal.FieldUpdates;
+import static accord.impl.progresslog.DefaultProgressLog.ModeFlag.CATCH_UP;
 import static accord.local.RedundantStatus.Property.LOCALLY_APPLIED;
 import static accord.local.RedundantStatus.Property.LOCALLY_DURABLE_TO_COMMAND_STORE;
 import static accord.local.RedundantStatus.Property.LOCALLY_DURABLE_TO_DATA_STORE;
@@ -595,33 +596,13 @@ public class AccordCommandStore extends CommandStore
         return safeRedundantBefore.redundantBefore;
     }
 
-    public AccordCommandStoreReplayer replayer()
+    @Override
+    public AccordCommandStoreReplayer replayer(Mode mode)
     {
-        Mode mode;
-        if (journal instanceof AccordJournal)
-        {
-            ReplayMode replayMode = getAccord().journal.replay;
-            switch (replayMode)
-            {
-                default: throw new UnhandledEnum(replayMode);
-                case NON_DURABLE:
-                    mode = Mode.NON_DURABLE;
-                    throw new UnsupportedOperationException("Not yet safe to use NON_DURABLE ReplayMode");
-                case PART_NON_DURABLE:
-                    mode = Mode.PART_NON_DURABLE;
-                    break;
-                case ALL:
-                case RESET:
-                    mode = Mode.ALL;
-            }
-        }
-        else
-        {
-            mode = Mode.ALL;
-        }
+        ReplayMode replayMode = getAccord().journal.replay;
         return new AccordCommandStoreReplayer(this, mode);
     }
-
+    
     static final AtomicLong nextDurabilityLoggingId = new AtomicLong();
 
     @Override
@@ -892,7 +873,10 @@ public class AccordCommandStore extends CommandStore
             unsafeSetMaxConflicts(mxc);
             unsafeSetRejectBefore(rjb);
             ((DefaultLocalListeners) listeners).restore(dll);
+            boolean unsetCatchup = ((DefaultProgressLog) progressLog).setModeExclusive(safeStore, CATCH_UP);
             ((DefaultProgressLog) progressLog).restore(safeStore, dpl);
+            if (unsetCatchup)
+                ((DefaultProgressLog) progressLog).unsetModeExclusive(CATCH_UP);
             return Map.entry(id, segment + 1);
         });
     }

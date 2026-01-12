@@ -1035,10 +1035,17 @@ public abstract class AccordExecutor implements CacheSize, LoadExecutor<AccordTa
                 waiting = null;
             }
 
-            if (stopped && reject(task))
-                task.fail(new RejectedExecutionException(commandStoreId + " is terminated. Cannot execute " + ((AccordTask<?>) task).preLoadContext()));
-            else
-                task.runInternal();
+            try
+            {
+                if (stopped && reject(task))
+                    task.fail(new RejectedExecutionException(commandStoreId + " is terminated. Cannot execute " + ((AccordTask<?>) task).preLoadContext()));
+                else
+                    task.runInternal();
+            }
+            finally
+            {
+                owner = null;
+            }
         }
 
         private boolean reject(Task task)
@@ -1061,9 +1068,10 @@ public abstract class AccordExecutor implements CacheSize, LoadExecutor<AccordTa
             try { task.cleanupExclusive(); }
             finally
             {
-                owner = null;
                 running = false;
                 task = super.poll();
+
+                // it should only be possible for this method to be invoked once we're on the running queue
                 AccordExecutor.this.running.remove(selfTask);
                 if (task != null)
                 {
@@ -1094,37 +1102,47 @@ public abstract class AccordExecutor implements CacheSize, LoadExecutor<AccordTa
         @Override
         protected void remove(Task remove)
         {
-            Invariants.require(remove != null);
-            if (remove != task)
-            {
-                super.remove(remove);
-            }
-            else if (!running)
-            {
-                // cannot overwrite task while it is being executed - this cannot happen for AccordTask
-                // but can for other tasks that don't track their own state
+            if (remove == task) removeCurrentTask(remove);
+            else super.remove(remove);
+        }
 
-                task = super.poll();
-                if (waitingToRun.contains(selfTask))
-                {
-                    if (task == null) waitingToRun.remove(selfTask);
-                    else
-                    {
-                        selfTask.queuePosition = task.queuePosition;
-                        waitingToRun.update(selfTask);
-                    }
-                }
+        @Override
+        protected boolean removeIfContains(Task remove)
+        {
+            if (remove == task) return removeCurrentTask(remove);
+            else return super.removeIfContains(remove);
+        }
+
+        private boolean removeCurrentTask(Node remove)
+        {
+            if (running)
+                return false;
+
+            Invariants.require(remove == task);
+            // cannot overwrite task while it is being executed - this cannot happen for AccordTask
+            // but can for other tasks that don't track their own state
+
+            task = super.poll();
+            if (waitingToRun.contains(selfTask))
+            {
+                if (task == null) waitingToRun.remove(selfTask);
                 else
                 {
-                    Invariants.expect(false, "%s should have been queued to run as it had the task %s pending, that has now been cancelled", this, remove);
-                    if (task != null)
-                    {
-                        selfTask.queuePosition = task.queuePosition;
-                        waitingToRun.append(selfTask);
-                    }
+                    selfTask.queuePosition = task.queuePosition;
+                    waitingToRun.update(selfTask);
                 }
             }
-            Invariants.require(task == null || running || waitingToRun.contains(selfTask));
+            else
+            {
+                Invariants.expect(false, "%s should have been queued to run as it had the task %s pending, that has now been cancelled", this, remove);
+                if (task != null)
+                {
+                    selfTask.queuePosition = task.queuePosition;
+                    waitingToRun.append(selfTask);
+                }
+            }
+            Invariants.require(task == null || waitingToRun.contains(selfTask));
+            return true;
         }
 
         public boolean inExecutor()
@@ -1302,6 +1320,12 @@ public abstract class AccordExecutor implements CacheSize, LoadExecutor<AccordTa
         protected void remove(T remove)
         {
             super.remove(remove);
+        }
+
+        @Override
+        protected boolean removeIfContains(T node)
+        {
+            return super.removeIfContains(node);
         }
 
         protected boolean contains(T contains)
