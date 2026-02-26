@@ -22,11 +22,13 @@ import java.util.Arrays;
 import java.util.HashSet;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
+
 import javax.annotation.Nullable;
 
 import com.google.common.primitives.Ints;
 
 import accord.utils.Invariants;
+
 import org.apache.cassandra.db.virtual.LogMessagesTable;
 import org.apache.cassandra.db.virtual.SlowQueriesTable;
 import org.apache.cassandra.exceptions.ConfigurationException;
@@ -60,6 +62,8 @@ public enum CassandraRelevantProperties
     ALLOW_UNSAFE_REPLACE("cassandra.allow_unsafe_replace"),
     ALLOW_UNSAFE_TRANSIENT_CHANGES("cassandra.allow_unsafe_transient_changes"),
     APPROXIMATE_TIME_PRECISION_MS("cassandra.approximate_time_precision_ms", "2"),
+    ASYNC_PROFILER_ENABLED("cassandra.async_profiler.enabled", "false"),
+    ASYNC_PROFILER_UNSAFE_MODE("cassandra.async_profiler.unsafe_mode", "false"),
     /** 2 ** GENSALT_LOG2_ROUNDS rounds of hashing will be performed. */
     AUTH_BCRYPT_GENSALT_LOG2_ROUNDS("cassandra.auth_bcrypt_gensalt_log2_rounds", "4"),
     /** We expect default values on cache retries and interval to be sufficient for everyone but have this escape hatch just in case. */
@@ -193,6 +197,7 @@ public enum CassandraRelevantProperties
     CONSISTENT_RANGE_MOVEMENT("cassandra.consistent.rangemovement", "true"),
     CONSISTENT_SIMULTANEOUS_MOVES_ALLOW("cassandra.consistent.simultaneousmoves.allow"),
     CRYPTO_PROVIDER_CLASS_NAME("cassandra.crypto_provider_class_name"),
+    CURSOR_COMPACTION_ENABLED("cassandra.cursor_compaction_enabled", "true"),
     CUSTOM_DISK_ERROR_HANDLER("cassandra.custom_disk_error_handler"),
     CUSTOM_GUARDRAILS_CONFIG_PROVIDER_CLASS("cassandra.custom_guardrails_config_provider_class"),
     CUSTOM_QUERY_HANDLER_CLASS("cassandra.custom_query_handler_class"),
@@ -228,6 +233,7 @@ public enum CassandraRelevantProperties
     DTEST_ACCORD_ENABLED("jvm_dtest.accord.enabled", "true"),
     DTEST_ACCORD_JOURNAL_SANITY_CHECK_ENABLED("jvm_dtest.accord.journal_sanity_check_enabled", "false"),
     DTEST_API_LOG_TOPOLOGY("cassandra.dtest.api.log.topology"),
+    DTEST_IGNORE_SHUTDOWN_THREADCOUNT("jvm_dtests.ignore_shutdown_threadcount"),
     /** This property indicates if the code is running under the in-jvm dtest framework */
     DTEST_IS_IN_JVM_DTEST("org.apache.cassandra.dtest.is_in_jvm_dtest"),
     /** In_JVM dtest property indicating that the test should use "latest" configuration */
@@ -425,6 +431,8 @@ public enum CassandraRelevantProperties
     OTCP_LARGE_MESSAGE_THRESHOLD("cassandra.otcp_large_message_threshold", convertToString(1024 * 64)),
     /** Enabled/disable TCP_NODELAY for intradc connections. Defaults is enabled. */
     OTC_INTRADC_TCP_NODELAY("cassandra.otc_intradc_tcp_nodelay", "true"),
+    OVERRIDE_COMPACTION_ENTITIES("cassandra.override_compaction.entities"),
+    OVERRIDE_COMPACTION_PARAMS("cassandra.override_compaction.params"),
     OVERRIDE_DECOMMISSION("cassandra.override_decommission"),
     PARENT_REPAIR_STATUS_CACHE_SIZE("cassandra.parent_repair_status_cache_size", "100000"),
     PARENT_REPAIR_STATUS_EXPIRY_SECONDS("cassandra.parent_repair_status_expiry_seconds", convertToString(TimeUnit.SECONDS.convert(1, TimeUnit.DAYS))),
@@ -578,8 +586,6 @@ public enum CassandraRelevantProperties
     // transactional cluster metadata relevant properties
     // TODO: not a fan of being forced to prefix these to satisfy the alphabetic ordering constraint
     //       but it makes sense to group logically related properties together
-
-    TCM_ALLOW_TRANSFORMATIONS_DURING_UPGRADES("cassandra.allow_transformations_during_upgrades", "false"),
     /**
      * for testing purposes disable the automatic CMS reconfiguration after a bootstrap/replace/move operation
      */

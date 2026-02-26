@@ -19,15 +19,19 @@
 package org.apache.cassandra.config;
 
 import java.util.Collections;
+import java.util.Map;
 import java.util.Set;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
+
 import javax.annotation.Nullable;
 
 import com.google.common.collect.Sets;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.apache.cassandra.cql3.statements.schema.KeyspaceAttributes;
 import org.apache.cassandra.cql3.statements.schema.TableAttributes;
 import org.apache.cassandra.db.ConsistencyLevel;
 import org.apache.cassandra.db.guardrails.CustomGuardrailConfig;
@@ -37,6 +41,7 @@ import org.apache.cassandra.db.guardrails.ValueGenerator;
 import org.apache.cassandra.db.guardrails.ValueValidator;
 import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.service.disk.usage.DiskUsageMonitor;
+import org.apache.cassandra.utils.LocalizeString;
 
 import static java.lang.String.format;
 import static java.util.stream.Collectors.toSet;
@@ -72,6 +77,9 @@ public class GuardrailsOptions implements GuardrailsConfig
         config.table_properties_warned = validateTableProperties(config.table_properties_warned, "table_properties_warned");
         config.table_properties_ignored = validateTableProperties(config.table_properties_ignored, "table_properties_ignored");
         config.table_properties_disallowed = validateTableProperties(config.table_properties_disallowed, "table_properties_disallowed");
+        config.keyspace_properties_warned = validateKeyspaceProperties(config.keyspace_properties_warned, "keyspace_properties_warned");
+        config.keyspace_properties_ignored = validateKeyspaceProperties(config.keyspace_properties_ignored, "keyspace_properties_ignored");
+        config.keyspace_properties_disallowed = validateKeyspaceProperties(config.keyspace_properties_disallowed, "keyspace_properties_disallowed");
         validateMaxIntThreshold(config.page_size_warn_threshold, config.page_size_fail_threshold, "page_size");
         validateMaxIntThreshold(config.partition_keys_in_select_warn_threshold, config.partition_keys_in_select_fail_threshold, "partition_keys_in_select");
         validateMaxIntThreshold(config.in_select_cartesian_product_warn_threshold, config.in_select_cartesian_product_fail_threshold, "in_select_cartesian_product");
@@ -103,7 +111,8 @@ public class GuardrailsOptions implements GuardrailsConfig
                                  config.sai_sstable_indexes_per_query_fail_threshold,
                                  "sai_sstable_indexes_per_query",
                                  false);
-        validatePasswordValidator(config.password_validator);
+        validatePasswordPolicy(config.password_policy);
+        validateRoleNamePolicy(config.role_name_policy);
     }
 
     @Override
@@ -179,6 +188,48 @@ public class GuardrailsOptions implements GuardrailsConfig
                                   fail,
                                   () -> config.columns_per_table_fail_threshold,
                                   x -> config.columns_per_table_fail_threshold = x);
+    }
+
+    @Override
+    public Set<String> getKeyspacePropertiesWarned()
+    {
+        return config.keyspace_properties_warned;
+    }
+    
+    public void setKeyspacePropertiesWarned(Set<String> properties)
+    {
+        updatePropertyWithLogging("keyspace_properties_warned",
+                                  validateKeyspaceProperties(properties, "keyspace_properties_warned"),
+                                  () -> config.keyspace_properties_warned,
+                                  x -> config.keyspace_properties_warned = x);
+    }
+
+    @Override
+    public Set<String> getKeyspacePropertiesIgnored()
+    {
+        return config.keyspace_properties_ignored;
+    }
+    
+    public void setKeyspacePropertiesIgnored(Set<String> properties)
+    {
+        updatePropertyWithLogging("keyspace_properties_ignored",
+                                  validateKeyspaceProperties(properties, "keyspace_properties_ignored"),
+                                  () -> config.keyspace_properties_ignored,
+                                  x -> config.keyspace_properties_ignored = x);
+    }
+
+    @Override
+    public Set<String> getKeyspacePropertiesDisallowed()
+    {
+        return config.keyspace_properties_disallowed;
+    }
+    
+    public void setKeyspacePropertiesDisallowed(Set<String> properties)
+    {
+        updatePropertyWithLogging("keyspace_properties_disallowed",
+                                  validateKeyspaceProperties(properties, "keyspace_properties_disallowed"),
+                                  () -> config.keyspace_properties_disallowed,
+                                  x -> config.keyspace_properties_disallowed = x);
     }
 
     @Override
@@ -938,6 +989,20 @@ public class GuardrailsOptions implements GuardrailsConfig
                                   x -> config.data_disk_usage_percentage_fail_threshold = x);
     }
 
+
+    public boolean getDataDiskUsageKeyspaceWideProtectionEnabled()
+    {
+        return config.data_disk_usage_keyspace_wide_protection_enabled;
+    }
+
+    public void setDataDiskUsageKeyspaceWideProtectionEnabled(boolean enabled)
+    {
+        updatePropertyWithLogging("data_disk_usage_keyspace_wide_protection_enabled",
+                                  enabled,
+                                  () -> config.data_disk_usage_keyspace_wide_protection_enabled,
+                                  x -> config.data_disk_usage_keyspace_wide_protection_enabled = x);
+    }
+
     @Override
     public DataStorageSpec.LongBytesBound getDataDiskUsageMaxDiskSize()
     {
@@ -991,9 +1056,15 @@ public class GuardrailsOptions implements GuardrailsConfig
     }
 
     @Override
-    public CustomGuardrailConfig getPasswordValidatorConfig()
+    public CustomGuardrailConfig getPasswordPolicyConfig()
     {
-        return config.password_validator;
+        return config.password_policy;
+    }
+
+    @Override
+    public CustomGuardrailConfig getRoleNamePolicyConfig()
+    {
+        return config.role_name_policy;
     }
 
     public void setMaximumReplicationFactorThreshold(int warn, int fail)
@@ -1424,10 +1495,40 @@ public class GuardrailsOptions implements GuardrailsConfig
         Set<String> diff = Sets.difference(lowerCaseProperties, TableAttributes.allKeywords());
 
         if (!diff.isEmpty())
-            throw new IllegalArgumentException(format("Invalid value for %s: '%s' do not parse as valid table properties",
-                                                      name, diff));
+            throw new IllegalArgumentException(invalidValueMessage(name, diff, "table"));
 
         return lowerCaseProperties;
+    }
+
+    private static Set<String> validateKeyspaceProperties(Set<String> properties, String name)
+    {
+        if (properties == null)
+            throw new IllegalArgumentException(format("Invalid value for %s: null is not allowed", name));
+
+        Set<String> lowerCaseProperties = properties.stream().map(LocalizeString::toLowerCaseLocalized).collect(toSet());
+
+        for (String requiredKeyword : KeyspaceAttributes.requiredKeywords())
+        {
+            if (lowerCaseProperties.contains(requiredKeyword))
+                throw new IllegalArgumentException(format("Invalid value for %s: '%s' is a required keyspace property", name, requiredKeyword));
+        }
+
+        Set<String> diff = Sets.difference(lowerCaseProperties, KeyspaceAttributes.allKeywords());
+
+        if (!diff.isEmpty())
+            throw new IllegalArgumentException(invalidValueMessage(name, diff, "keyspace"));
+
+        return lowerCaseProperties;
+    }
+
+    public static String invalidValueMessage(String name, Set<String> invalidProperties, String type)
+    {
+        if (invalidProperties.size() == 1)
+            return format("Invalid value for %s: '%s' does not parse as valid %s property.",
+                          name, invalidProperties, type);
+
+        return format("Invalid values for %s: '%s' do not parse as valid %s properties",
+                      name, invalidProperties, type);
     }
 
     private static Set<ConsistencyLevel> validateConsistencyLevels(Set<ConsistencyLevel> consistencyLevels, String name)
@@ -1461,8 +1562,13 @@ public class GuardrailsOptions implements GuardrailsConfig
      *
      * @param config configuration to use for generator and validator
      */
-    private static void validatePasswordValidator(CustomGuardrailConfig config)
+    private static void validatePasswordPolicy(CustomGuardrailConfig config)
     {
-        ValueGenerator.getGenerator("password", config).generate(ValueValidator.getValidator("password", config));
+        ValueGenerator.getGenerator("password_policy", config).generate(ValueValidator.getValidator("password_policy", config), Map.of());
+    }
+
+    private static void validateRoleNamePolicy(CustomGuardrailConfig config)
+    {
+        ValueGenerator.getGenerator("role_name_policy", config).generate(ValueValidator.getValidator("role_name_policy", config), Map.of());
     }
 }

@@ -17,6 +17,11 @@
  */
 package org.apache.cassandra.cql3.statements;
 
+import java.util.Map;
+
+import org.apache.commons.lang3.builder.ToStringBuilder;
+import org.apache.commons.lang3.builder.ToStringStyle;
+
 import org.apache.cassandra.audit.AuditLogContext;
 import org.apache.cassandra.audit.AuditLogEntryType;
 import org.apache.cassandra.auth.AuthenticatedUser;
@@ -37,9 +42,8 @@ import org.apache.cassandra.exceptions.RequestValidationException;
 import org.apache.cassandra.exceptions.UnauthorizedException;
 import org.apache.cassandra.service.ClientState;
 import org.apache.cassandra.transport.messages.ResultMessage;
-import org.apache.commons.lang3.builder.ToStringBuilder;
-import org.apache.commons.lang3.builder.ToStringStyle;
-import static org.apache.cassandra.cql3.statements.RequestValidations.*;
+
+import static org.apache.cassandra.cql3.statements.RequestValidations.checkTrue;
 
 public class AlterRoleStatement extends AuthenticationStatement
 {
@@ -135,19 +139,20 @@ public class AlterRoleStatement extends AuthenticationStatement
 
         if (opts.isGeneratedPassword())
         {
-            String generatedPassword = Guardrails.password.generate();
+            String generatedPassword = Guardrails.passwordPolicy.generate(state, Map.of());
             if (generatedPassword != null)
                 opts.setOption(IRoleManager.Option.PASSWORD, generatedPassword);
             else
-                throw new InvalidRequestException("You have to enable password_validator and it's generator_class_name property " +
+                throw new InvalidRequestException("You have to enable password_policy and its generator_class_name property " +
                                                   "in cassandra.yaml to be able to generate passwords.");
         }
 
         if (opts.getPassword().isPresent())
-            Guardrails.password.guard(opts.getPassword().get(), state);
+            Guardrails.passwordPolicy.validate(opts.getPassword().get(), state);
 
+        ResultMessage resultMessage = null;
         if (!opts.isEmpty())
-            DatabaseDescriptor.getRoleManager().alterRole(state.getUser(), role, opts);
+            resultMessage = DatabaseDescriptor.getRoleManager().alterRoleWithResult(state.getUser(), role, opts);
 
         if (dcPermissions != null)
             DatabaseDescriptor.getNetworkAuthorizer().setRoleDatacenters(role, dcPermissions);
@@ -155,7 +160,7 @@ public class AlterRoleStatement extends AuthenticationStatement
         if (cidrPermissions != null)
             DatabaseDescriptor.getCIDRAuthorizer().setCidrGroupsForRole(role, cidrPermissions);
 
-        return getResultMessage(opts);
+        return resultMessage;
     }
 
     @Override

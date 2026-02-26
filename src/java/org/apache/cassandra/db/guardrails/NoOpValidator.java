@@ -18,6 +18,7 @@
 
 package org.apache.cassandra.db.guardrails;
 
+import java.util.Map;
 import java.util.Optional;
 
 import javax.annotation.Nonnull;
@@ -30,7 +31,9 @@ import org.apache.cassandra.exceptions.ConfigurationException;
  */
 public class NoOpValidator<T> extends ValueValidator<T>
 {
-    private static final CustomGuardrailConfig config = new CustomGuardrailConfig();
+    private static final CustomGuardrailConfig config = new CustomGuardrailConfig(Map.of(VALIDATOR_CLASS_NAME_KEY, NoOpValidator.class.getCanonicalName()));
+
+    public static final NoOpValidator INSTANCE = new NoOpValidator<>(config);
 
     public NoOpValidator(CustomGuardrailConfig unused)
     {

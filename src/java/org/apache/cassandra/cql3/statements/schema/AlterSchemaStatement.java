@@ -34,9 +34,14 @@ import org.apache.cassandra.cql3.QueryProcessor;
 import org.apache.cassandra.db.compaction.TimeWindowCompactionStrategy;
 import org.apache.cassandra.db.guardrails.Guardrails;
 import org.apache.cassandra.exceptions.InvalidRequestException;
-import org.apache.cassandra.schema.*;
 import org.apache.cassandra.exceptions.SyntaxException;
+import org.apache.cassandra.schema.KeyspaceMetadata;
+import org.apache.cassandra.schema.Keyspaces;
 import org.apache.cassandra.schema.Keyspaces.KeyspacesDiff;
+import org.apache.cassandra.schema.Schema;
+import org.apache.cassandra.schema.SchemaConstants;
+import org.apache.cassandra.schema.SchemaTransformation;
+import org.apache.cassandra.schema.TableParams;
 import org.apache.cassandra.service.ClientState;
 import org.apache.cassandra.service.ClientWarn;
 import org.apache.cassandra.service.QueryState;
@@ -183,12 +188,20 @@ abstract public class AlterSchemaStatement implements CQLStatement.SingleKeyspac
         // submission to the CMS, but it can't guarantee that the statement can be applied as-is on every node in the
         // cluster, as config can be heterogenous falling back to safe defaults may occur on some nodes.
         ClusterMetadata metadata = ClusterMetadata.current();
-        apply(metadata);
+        Keyspaces proposed = apply(metadata);
+        KeyspacesDiff localDiff =  Keyspaces.diff(metadata.schema.getKeyspaces(), proposed);
+        if (localDiff.isEmpty())
+            return new ResultMessage.Void();
+
         ClusterMetadata result = commit(metadata);
 
         KeyspacesDiff diff = Keyspaces.diff(metadata.schema.getKeyspaces(), result.schema.getKeyspaces());
         clientWarnings(diff).forEach(ClientWarn.instance::warn);
 
+        // Even though the preliminary local application produced a non-empty diff, there may have been concurrent
+        // schema transformations that had been committed to the log but not yet enacted locally. So there remains a
+        // possibility that the ultimate result is a no-op. i.e. two identical "CREATE IF NOT EXISTS..." racing from
+        // different coordinators.
         if (diff.isEmpty())
             return new ResultMessage.Void();
 

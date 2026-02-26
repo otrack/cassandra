@@ -26,12 +26,14 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.function.IntFunction;
+
 import javax.annotation.Nonnull;
 
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
 
 import accord.utils.SortedArrays.SortedArrayList;
+
 import org.apache.cassandra.dht.IPartitioner;
 import org.apache.cassandra.dht.IPartitionerDependentSerializer;
 import org.apache.cassandra.io.AsymmetricParameterisedUnversionedSerializer;
@@ -580,7 +582,7 @@ public class CollectionSerializers
         return result;
     }
 
-    private static <V, P, C extends Collection<? super V>, Version> C deserializeCollection(P p, DataInputPlus in, AsymmetricParameterisedUnversionedSerializer<?, P, V> serializer, IntFunction<C> factory) throws IOException
+    private static <V, P, C extends Collection<? super V>> C deserializeCollection(P p, DataInputPlus in, AsymmetricParameterisedUnversionedSerializer<?, P, V> serializer, IntFunction<C> factory) throws IOException
     {
         int size = in.readUnsignedVInt32();
         C result = factory.apply(size);

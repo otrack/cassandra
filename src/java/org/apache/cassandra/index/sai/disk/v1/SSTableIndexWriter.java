@@ -24,9 +24,11 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
+
 import javax.annotation.concurrent.NotThreadSafe;
 
 import com.google.common.base.Stopwatch;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -98,6 +100,18 @@ public class SSTableIndexWriter implements PerColumnIndexWriter
             if (value != null)
                 addTerm(index.termType().asIndexBytes(value.duplicate()), key, sstableRowId);
         }
+    }
+
+    @Override
+    public void onSSTableWriterSwitched(Stopwatch stopwatch) throws IOException
+    {
+        if (maybeAbort())
+            return;
+
+        boolean emptySegment = currentBuilder == null || currentBuilder.isEmpty();
+        logger.debug(index.identifier().logMessage("Flushing index with {}buffered data on SSTable writer switched..."), emptySegment ? "no " : "");
+        if (!emptySegment)
+            flushSegment();
     }
 
     @Override

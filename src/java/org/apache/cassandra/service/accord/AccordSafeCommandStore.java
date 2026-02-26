@@ -22,6 +22,7 @@ import java.util.Collections;
 import java.util.Map;
 import java.util.Set;
 import java.util.function.Predicate;
+
 import javax.annotation.Nullable;
 
 import com.google.common.annotations.VisibleForTesting;
@@ -40,6 +41,9 @@ import accord.primitives.Timestamp;
 import accord.primitives.Txn;
 import accord.primitives.TxnId;
 import accord.primitives.Unseekables;
+import accord.utils.Invariants;
+
+import org.apache.cassandra.metrics.LogLinearDecayingHistograms;
 import org.apache.cassandra.service.accord.AccordCommandStore.ExclusiveCaches;
 import org.apache.cassandra.service.accord.AccordCommandStore.SafeRedundantBefore;
 import org.apache.cassandra.service.paxos.PaxosState;
@@ -205,6 +209,18 @@ public class AccordSafeCommandStore extends AbstractSafeCommandStore<AccordSafeC
     public NodeCommandStoreService node()
     {
         return commandStore.node();
+    }
+
+    public LogLinearDecayingHistograms.Buffer histogramBuffer()
+    {
+        if (task.histogramBuffer == null)
+        {
+            task.histogramBuffer = commandStore.metricsBuffer;
+            if (task.histogramBuffer == null)
+                task.histogramBuffer = commandStore.metricsBuffer = new LogLinearDecayingHistograms.Buffer(commandStore.executor().histograms);
+            Invariants.require(task.histogramBuffer.isEmpty());
+        }
+        return task.histogramBuffer;
     }
 
     private boolean visitForKey(Unseekables<?> keysOrRanges, Predicate<CommandsForKey> forEach)

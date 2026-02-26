@@ -30,8 +30,11 @@ import java.util.regex.MatchResult;
 import java.util.regex.Pattern;
 
 import com.google.common.annotations.VisibleForTesting;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import accord.topology.EpochReady;
 
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.Keyspace;
@@ -160,7 +163,7 @@ public class Rebuild
 
             StreamResultFuture streamResult = streamer.fetchAsync();
 
-            Future<?> accordReady = AccordService.instance().epochReadyFor(metadata);
+            Future<?> accordReady = AccordService.instance().epochReadyFor(metadata, EpochReady::reads);
             Future<?> ready = FutureCombiner.allOf(streamResult, accordReady);
 
             // wait for result

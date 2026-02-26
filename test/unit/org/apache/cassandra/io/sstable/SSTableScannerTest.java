@@ -27,6 +27,8 @@ import java.util.function.Consumer;
 import java.util.function.Function;
 
 import com.google.common.collect.Iterables;
+
+import org.hamcrest.Matchers;
 import org.junit.Assert;
 import org.junit.BeforeClass;
 import org.junit.Test;
@@ -53,7 +55,6 @@ import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.schema.KeyspaceParams;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.utils.ByteBufferUtil;
-import org.hamcrest.Matchers;
 
 import static org.apache.cassandra.dht.AbstractBounds.isEmpty;
 import static org.junit.Assert.assertEquals;
@@ -345,7 +346,12 @@ public class SSTableScannerTest
         // full range scan
         ISSTableScanner scanner = sstable.getScanner();
         for (int i = 4; i < 10; i++)
-            assertEquals(toKey(i), new String(scanner.next().partitionKey().getKey().array()));
+        {
+            try (UnfilteredRowIterator row = scanner.next())
+            {
+                assertEquals(toKey(i), new String(row.partitionKey().getKey().array()));
+            }
+        }
 
         scanner.close();
 

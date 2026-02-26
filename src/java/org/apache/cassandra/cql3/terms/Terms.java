@@ -18,18 +18,22 @@
 package org.apache.cassandra.cql3.terms;
 
 import java.nio.ByteBuffer;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.Objects;
 import java.util.stream.Collectors;
 
 import com.google.common.collect.ImmutableList;
+
 import org.apache.cassandra.cql3.AssignmentTestable;
 import org.apache.cassandra.cql3.ColumnSpecification;
 import org.apache.cassandra.cql3.QueryOptions;
 import org.apache.cassandra.cql3.VariableSpecifications;
+import org.apache.cassandra.cql3.functions.Function;
 import org.apache.cassandra.cql3.terms.Term.NonTerminal;
 import org.apache.cassandra.cql3.terms.Term.Terminal;
-import org.apache.cassandra.cql3.functions.Function;
-import org.apache.cassandra.db.marshal.*;
+import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.exceptions.InvalidRequestException;
 
 /**
@@ -111,6 +115,17 @@ public interface Terms
      * @param options the query options containing the values to bind markers to.
      */
     List<ByteBuffer> bindAndGet(QueryOptions options);
+
+    default boolean isSingleTerm(QueryOptions options)
+    {
+        return false;
+    }
+
+    default ByteBuffer bindAndGetSingleTermValue(QueryOptions options)
+    {
+        throw new IllegalStateException("bindAndGetSingleTermValue() method is not implemented, " +
+                                        "isSingleTerm() must be always checked before invoking this method");
+    }
 
     /**
      * A shorter for {@code bind(options).getElements()}.
@@ -622,6 +637,19 @@ public interface Terms
                 {
                     return Collections.singletonList(term.bindAndGet(options));
                 }
+
+                @Override
+                public boolean isSingleTerm(QueryOptions options)
+                {
+                    return true;
+                }
+
+                @Override
+                public ByteBuffer bindAndGetSingleTermValue(QueryOptions options)
+                {
+                    return term.bindAndGet(options);
+                }
+
 
                 @Override
                 public List<List<ByteBuffer>> bindAndGetElements(QueryOptions options)

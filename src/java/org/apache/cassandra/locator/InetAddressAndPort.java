@@ -27,9 +27,9 @@ import java.net.UnknownHostException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 import java.util.regex.Pattern;
-import java.util.List;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -44,8 +44,8 @@ import org.slf4j.LoggerFactory;
 import org.apache.cassandra.io.IVersionedSerializer;
 import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputPlus;
-import org.apache.cassandra.tcm.serialization.Version;
 import org.apache.cassandra.net.MessagingService;
+import org.apache.cassandra.tcm.serialization.Version;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.FastByteOperations;
@@ -63,7 +63,7 @@ import org.apache.cassandra.utils.FastByteOperations;
  * need to sometimes return a port and sometimes not.
  *
  */
-public final class InetAddressAndPort extends InetSocketAddress implements Comparable<InetAddressAndPort>, Serializable
+public final class InetAddressAndPort extends InetSocketAddress implements Comparable<InetAddressAndPort>, Serializable, Endpoint
 {
     private static final long serialVersionUID = 0;
     private static final Logger logger = LoggerFactory.getLogger(InetAddressAndPort.class);
@@ -380,6 +380,12 @@ public final class InetAddressAndPort extends InetSocketAddress implements Compa
     static int getDefaultPort()
     {
         return defaultPort;
+    }
+
+    @Override
+    public InetAddressAndPort endpoint()
+    {
+        return this;
     }
 
     public static final class MetadataSerializer implements org.apache.cassandra.tcm.serialization.MetadataSerializer<InetAddressAndPort>

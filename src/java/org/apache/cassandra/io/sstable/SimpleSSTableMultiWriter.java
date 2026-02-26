@@ -23,6 +23,7 @@ import java.util.Collections;
 import org.apache.cassandra.db.SerializationHeader;
 import org.apache.cassandra.db.commitlog.CommitLogPosition;
 import org.apache.cassandra.db.commitlog.IntervalSet;
+import org.apache.cassandra.db.compression.CompressionDictionaryManager;
 import org.apache.cassandra.db.lifecycle.ILifecycleTransaction;
 import org.apache.cassandra.db.rows.UnfilteredRowIterator;
 import org.apache.cassandra.index.Index;
@@ -80,6 +81,11 @@ public class SimpleSSTableMultiWriter implements SSTableMultiWriter
         return writer.getEstimatedOnDiskBytesWritten();
     }
 
+    public long getTotalRows()
+    {
+        return writer.getTotalRows();
+    }
+
     public TableId getTableId()
     {
         return writer.metadata().id;
@@ -122,17 +128,21 @@ public class SimpleSSTableMultiWriter implements SSTableMultiWriter
         MetadataCollector metadataCollector = new MetadataCollector(metadata.get().comparator)
                                               .commitLogIntervals(commitLogPositions != null ? commitLogPositions : IntervalSet.empty())
                                               .sstableLevel(sstableLevel);
-        SSTableWriter writer = descriptor.getFormat().getWriterFactory().builder(descriptor)
-                                            .setKeyCount(keyCount)
-                                            .setRepairedAt(repairedAt)
-                                            .setPendingRepair(pendingRepair)
-                                            .setTransientSSTable(isTransient)
-                                            .setTableMetadataRef(metadata)
-                                            .setMetadataCollector(metadataCollector)
-                                            .setSerializationHeader(header)
-                                            .addDefaultComponents(indexGroups)
-                                            .setSecondaryIndexGroups(indexGroups)
-                                            .build(txn, owner);
+        CompressionDictionaryManager compressionDictionaryManager = owner == null ? null : owner.compressionDictionaryManager();
+        SSTableWriter writer = descriptor.getFormat()
+                                         .getWriterFactory()
+                                         .builder(descriptor)
+                                         .setKeyCount(keyCount)
+                                         .setRepairedAt(repairedAt)
+                                         .setPendingRepair(pendingRepair)
+                                         .setTransientSSTable(isTransient)
+                                         .setTableMetadataRef(metadata)
+                                         .setMetadataCollector(metadataCollector)
+                                         .setSerializationHeader(header)
+                                         .addDefaultComponents(indexGroups)
+                                         .setSecondaryIndexGroups(indexGroups)
+                                         .setCompressionDictionaryManager(compressionDictionaryManager)
+                                         .build(txn, owner);
         return new SimpleSSTableMultiWriter(writer, txn);
     }
 }

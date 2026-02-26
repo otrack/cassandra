@@ -24,6 +24,7 @@ import java.util.stream.Stream;
 import accord.api.Agent;
 import accord.utils.QuadFunction;
 import accord.utils.QuintConsumer;
+
 import org.apache.cassandra.concurrent.DebuggableTask.DebuggableTaskRunner;
 import org.apache.cassandra.service.accord.AccordExecutorLoops.LoopTask;
 import org.apache.cassandra.utils.concurrent.ConcurrentLinkedStack;
@@ -204,7 +205,7 @@ abstract class AccordExecutorAbstractLockLoop extends AccordExecutor
                         pauseExclusive();
                         exitLockExclusive();
 
-                        try { agent.onUncaughtException(t); }
+                        try { agent.onException(t); }
                         catch (Throwable t2) { }
                     }
                     finally
@@ -271,13 +272,13 @@ abstract class AccordExecutorAbstractLockLoop extends AccordExecutor
                             catch (Throwable t2) { t.addSuppressed(t2); }
                             try { completeTaskExclusive(task); }
                             catch (Throwable t2) { t.addSuppressed(t2); }
-                            try { agent.onUncaughtException(t); }
+                            try { agent.onException(t); }
                             catch (Throwable t2) { /* nothing we can sensibly do after already reporting */ }
                             task = null;
                         }
                         else
                         {
-                            try { agent.onUncaughtException(t); }
+                            try { agent.onException(t); }
                             catch (Throwable t2) { /* nothing we can sensibly do after already reporting */ }
                         }
                         if (isHeldByExecutor)
@@ -302,7 +303,7 @@ abstract class AccordExecutorAbstractLockLoop extends AccordExecutor
                             try
                             {
                                 t2.addSuppressed(t);
-                                agent.onUncaughtException(t2);
+                                agent.onException(t2);
                             }
                             catch (Throwable t3)
                             {

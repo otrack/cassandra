@@ -19,14 +19,19 @@
 package org.apache.cassandra.tcm.membership;
 
 import java.io.IOException;
-import java.util.*;
+import java.util.Collection;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.NavigableSet;
+import java.util.Objects;
+import java.util.Set;
+import java.util.UUID;
 import java.util.stream.Collectors;
 
 import javax.annotation.Nullable;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
-import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Multimap;
 import com.google.common.collect.Sets;
 
@@ -35,16 +40,16 @@ import org.slf4j.LoggerFactory;
 
 import accord.utils.Invariants;
 import accord.utils.btree.BTreeSet;
+
 import org.apache.cassandra.db.TypeSizes;
 import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.locator.InetAddressAndPort;
-
+import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.tcm.Epoch;
 import org.apache.cassandra.tcm.MetadataValue;
 import org.apache.cassandra.tcm.serialization.MetadataSerializer;
 import org.apache.cassandra.tcm.serialization.Version;
-import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.utils.Pair;
 import org.apache.cassandra.utils.UUIDSerializer;
 import org.apache.cassandra.utils.btree.BTreeBiMap;
@@ -73,6 +78,7 @@ public class Directory implements MetadataValue<Directory>
     private final BTreeMap<String, Multimap<String, InetAddressAndPort>> racksByDC;
     public final NodeVersion clusterMinVersion;
     public final NodeVersion clusterMaxVersion;
+    public final Version commonSerializationVersion;
 
     public Directory()
     {
@@ -115,6 +121,7 @@ public class Directory implements MetadataValue<Directory>
         Pair<NodeVersion, NodeVersion> minMaxVer = minMaxVersions(states, versions);
         clusterMinVersion = minMaxVer.left;
         clusterMaxVersion = minMaxVer.right;
+        commonSerializationVersion = minCommonSerializationVersion(states, versions);
     }
 
     @Override
@@ -131,6 +138,9 @@ public class Directory implements MetadataValue<Directory>
                ", hostIds=" + hostIds +
                ", endpointsByDC=" + endpointsByDC +
                ", racksByDC=" + racksByDC +
+               ", clusterMinVersion=" + clusterMinVersion +
+               ", clusterMaxVersion=" + clusterMaxVersion +
+               ", commonSerializationVersion=" + commonSerializationVersion +
                '}';
     }
 
@@ -173,7 +183,8 @@ public class Directory implements MetadataValue<Directory>
         return with(addresses, location, CURRENT);
     }
 
-    public Directory with(NodeId id, NodeAddresses addresses, Location location, NodeVersion nodeVersion)
+    @VisibleForTesting
+    public Directory unsafeWithNodeForTesting(NodeId id, NodeAddresses addresses, Location location, NodeVersion nodeVersion)
     {
         return with(addresses, id, id.toUUID(), location, nodeVersion);
     }
@@ -379,9 +390,9 @@ public class Directory implements MetadataValue<Directory>
      * those cases use allJoinedEndpoints.
      * @return
      */
-    public ImmutableList<InetAddressAndPort> allAddresses()
+    public Set<InetAddressAndPort> allAddresses()
     {
-        return ImmutableList.copyOf(peers.values());
+        return peers.values();
     }
 
     public NavigableSet<NodeId> peerIds()
@@ -776,6 +787,21 @@ public class Directory implements MetadataValue<Directory>
         if (minVersion == null)
             return Pair.create(CURRENT, CURRENT);
         return Pair.create(minVersion, maxVersion);
+    }
+
+    public static Version minCommonSerializationVersion(BTreeMap<NodeId, NodeState> states, BTreeMap<NodeId, NodeVersion> versions)
+    {
+        int commonVersion = Integer.MAX_VALUE;
+        for (Map.Entry<NodeId, NodeState> entry : states.entrySet())
+        {
+            if (entry.getValue() != NodeState.LEFT)
+            {
+                NodeVersion ver = versions.get(entry.getKey());
+                if (ver.serializationVersion > Version.OLD.asInt() && ver.serializationVersion < commonVersion)
+                    commonVersion = ver.serializationVersion;
+            }
+        }
+        return commonVersion == Integer.MAX_VALUE ? NodeVersion.CURRENT_METADATA_VERSION : Version.fromInt(commonVersion);
     }
 
     @Override

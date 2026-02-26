@@ -19,6 +19,7 @@
 package org.apache.cassandra.exceptions;
 
 import java.io.IOException;
+
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 
@@ -125,7 +126,7 @@ public class RequestFailure
         if (t instanceof CoordinatorBehindException)
             return COORDINATOR_BEHIND;
 
-        return UNKNOWN;
+        return new RequestFailure(t);
     }
 
     public static RequestFailure forReason(RequestFailureReason reason)

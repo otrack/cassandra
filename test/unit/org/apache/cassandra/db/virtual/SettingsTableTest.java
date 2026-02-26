@@ -26,33 +26,34 @@ import java.util.Set;
 import java.util.TreeMap;
 import java.util.stream.Collectors;
 
+import com.datastax.driver.core.ResultSet;
+import com.datastax.driver.core.Row;
 import com.google.common.collect.ImmutableList;
+
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.yaml.snakeyaml.introspector.Property;
 
-import com.datastax.driver.core.ResultSet;
-import com.datastax.driver.core.Row;
 import org.apache.cassandra.config.CassandraRelevantProperties;
 import org.apache.cassandra.config.Config;
-import org.apache.cassandra.config.Redacted;
 import org.apache.cassandra.config.DefaultLoader;
 import org.apache.cassandra.config.DurationSpec;
 import org.apache.cassandra.config.EncryptionOptions.ServerEncryptionOptions.Builder;
 import org.apache.cassandra.config.EncryptionOptions.ServerEncryptionOptions.InternodeEncryption;
 import org.apache.cassandra.config.JMXServerOptions;
 import org.apache.cassandra.config.ParameterizedClass;
+import org.apache.cassandra.config.Redacted;
 import org.apache.cassandra.config.TransparentDataEncryptionOptions;
 import org.apache.cassandra.cql3.CQLTester;
 import org.apache.cassandra.distributed.shared.WithProperties;
 import org.apache.cassandra.security.SSLFactory;
 import org.apache.cassandra.utils.JsonUtils;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.yaml.snakeyaml.introspector.Property;
 
-import static org.apache.cassandra.config.EncryptionOptions.ClientEncryptionOptions.ClientAuth.REQUIRED;
 import static java.util.stream.Collectors.toMap;
+import static org.apache.cassandra.config.EncryptionOptions.ClientEncryptionOptions.ClientAuth.REQUIRED;
 
 public class SettingsTableTest extends CQLTester
 {
@@ -175,6 +176,16 @@ public class SettingsTableTest extends CQLTester
         assertRowsNet(executeNet(q), new Object[] {"credentials_update_interval", null});
         q = "SELECT * FROM vts.settings WHERE name = 'credentials_update_interval_in_ms';";
         assertRowsNet(executeNet(q), new Object[] {"credentials_update_interval_in_ms", "-1"});
+
+        // test non matching auth related properties
+        q = "SELECT * FROM vts.settings WHERE name = 'authenticator';";
+        assertRowsNet(executeNet(q), new Object[] {"authenticator", null});
+        q = "SELECT * FROM vts.settings WHERE name = 'authorizer';";
+        assertRowsNet(executeNet(q), new Object[] {"authorizer", null});
+        q = "SELECT * FROM vts.settings WHERE name = 'network_authorizer';";
+        assertRowsNet(executeNet(q), new Object[] {"network_authorizer", null});
+        q= "select * from vts.settings where name = 'role_manager';";
+        assertRowsNet(executeNet(q), new Object[] {"role_manager", null});
     }
 
     private void check(String keyspaceTable, String setting, String expected)

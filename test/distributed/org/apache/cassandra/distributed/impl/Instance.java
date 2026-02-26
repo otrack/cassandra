@@ -42,16 +42,19 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Stream;
+
 import javax.annotation.Nullable;
 import javax.management.ListenerNotFoundException;
 import javax.management.Notification;
 import javax.management.NotificationListener;
 
 import com.google.common.annotations.VisibleForTesting;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import io.netty.util.concurrent.GlobalEventExecutor;
+import accord.utils.Invariants;
+
 import org.apache.cassandra.Util;
 import org.apache.cassandra.audit.AuditLogManager;
 import org.apache.cassandra.auth.AuthCache;
@@ -64,6 +67,7 @@ import org.apache.cassandra.concurrent.NamedThreadFactory;
 import org.apache.cassandra.concurrent.ScheduledExecutors;
 import org.apache.cassandra.concurrent.SharedExecutorPool;
 import org.apache.cassandra.concurrent.Stage;
+import org.apache.cassandra.config.CassandraRelevantProperties;
 import org.apache.cassandra.config.Config;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.config.DurationSpec;
@@ -116,6 +120,7 @@ import org.apache.cassandra.io.util.PathUtils;
 import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.metrics.CassandraMetricsRegistry;
 import org.apache.cassandra.metrics.Sampler;
+import org.apache.cassandra.metrics.ThreadLocalMetrics;
 import org.apache.cassandra.net.Message;
 import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.net.NoPayload;
@@ -167,6 +172,8 @@ import org.apache.cassandra.utils.concurrent.UncheckedInterruptedException;
 import org.apache.cassandra.utils.logging.LoggingSupportFactory;
 import org.apache.cassandra.utils.memory.BufferPools;
 import org.apache.cassandra.utils.progress.jmx.JMXBroadcastExecutor;
+
+import io.netty.util.concurrent.GlobalEventExecutor;
 
 import static java.util.concurrent.TimeUnit.MINUTES;
 import static org.apache.cassandra.concurrent.ExecutorFactory.Global.executorFactory;
@@ -821,6 +828,9 @@ public class Instance extends IsolatedExecutor implements IInvokableInstance
         try
         {
             CommitLog.instance.recoverSegmentsOnDisk();
+            NodeId self = ClusterMetadata.current().myNodeId();
+            if (self != null)
+                AccordService.localStartup(self);
         }
         catch (IOException e)
         {
@@ -867,7 +877,10 @@ public class Instance extends IsolatedExecutor implements IInvokableInstance
             ClusterMetadataService.instance().processor().fetchLogAndWait();
             NodeId self = Register.maybeRegister();
             RegistrationStatus.instance.onRegistration();
-            AccordService.startup(self);
+            if (!AccordService.isSetupOrStarting())
+                AccordService.localStartup(self);
+            AccordService.distributedStartup();
+
             boolean joinRing = config.get(Constants.KEY_DTEST_JOIN_RING) == null || (boolean) config.get(Constants.KEY_DTEST_JOIN_RING);
             if (ClusterMetadata.current().directory.peerState(self) != NodeState.JOINED && joinRing)
             {
@@ -1009,7 +1022,8 @@ public class Instance extends IsolatedExecutor implements IInvokableInstance
                                 () -> EpochAwareDebounce.instance.close(),
                                 SnapshotManager.instance::close,
                                 () -> IndexStatusManager.instance.shutdownAndWait(1L, MINUTES),
-                                DiskErrorsHandlerService::close
+                                DiskErrorsHandlerService::close,
+                                () -> ThreadLocalMetrics.shutdownCleaner(1L, MINUTES)
             );
 
             internodeMessagingStarted = false;
@@ -1026,8 +1040,8 @@ public class Instance extends IsolatedExecutor implements IInvokableInstance
             );
 
             error = parallelRun(error, executor, () -> {
-                if (!AccordService.isSetup()) return;
-                AccordService.instance().shutdownAndWait(1l, MINUTES);
+                if (AccordService.isSetupOrStarting())
+                    AccordService.unsafeInstance().shutdownAndWait(1L, MINUTES);
             });
 
             // CommitLog must shut down after Stage, or threads from the latter may attempt to use the former.
@@ -1062,6 +1076,10 @@ public class Instance extends IsolatedExecutor implements IInvokableInstance
             try
             {
                 future.get();
+                ThreadGroup group = Thread.currentThread().getThreadGroup();
+                int active = group.activeCount();
+                Invariants.expect(group.getParent().activeCount() <= active
+                                  || CassandraRelevantProperties.DTEST_IGNORE_SHUTDOWN_THREADCOUNT.getBoolean());
                 return null;
             }
             finally

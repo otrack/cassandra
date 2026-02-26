@@ -35,21 +35,25 @@ import java.util.UUID;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.BiConsumer;
 import java.util.function.BiPredicate;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import java.util.stream.StreamSupport;
 
+import com.datastax.driver.core.utils.UUIDs;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+
 import org.junit.Before;
 import org.junit.Ignore;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 
-import com.datastax.driver.core.utils.UUIDs;
 import org.apache.cassandra.Util;
+import org.apache.cassandra.cql3.CQL3Type;
 import org.apache.cassandra.cql3.QueryProcessor;
 import org.apache.cassandra.cql3.UntypedResultSet;
 import org.apache.cassandra.cql3.constraints.ConstraintViolationException;
@@ -58,7 +62,13 @@ import org.apache.cassandra.cql3.functions.types.LocalDate;
 import org.apache.cassandra.cql3.functions.types.TypeCodec;
 import org.apache.cassandra.cql3.functions.types.UDTValue;
 import org.apache.cassandra.cql3.functions.types.UserType;
+import org.apache.cassandra.db.compression.CompressionDictionary;
+import org.apache.cassandra.db.compression.CompressionDictionary.DictId;
+import org.apache.cassandra.db.compression.ZstdCompressionDictionary;
+import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.marshal.FloatType;
+import org.apache.cassandra.db.marshal.SimpleDateType;
+import org.apache.cassandra.db.marshal.TimeType;
 import org.apache.cassandra.db.marshal.UTF8Type;
 import org.apache.cassandra.dht.ByteOrderedPartitioner;
 import org.apache.cassandra.dht.Murmur3Partitioner;
@@ -81,13 +91,15 @@ import org.apache.cassandra.schema.TableMetadataRef;
 import org.apache.cassandra.tcm.ClusterMetadata;
 import org.apache.cassandra.transport.ProtocolVersion;
 import org.apache.cassandra.utils.ByteBufferUtil;
+import org.apache.cassandra.utils.CompressionDictionaryHelper;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.JavaDriverUtils;
 import org.apache.cassandra.utils.OutputHandler;
-import org.assertj.core.api.Assertions;
 
+import static org.apache.cassandra.db.compression.CompressionDictionary.Kind.ZSTD;
 import static org.apache.cassandra.utils.Clock.Global.currentTimeMillis;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
@@ -1616,9 +1628,36 @@ public abstract class CQLSSTableWriterTest
     @Test
     public void testWritingVectorData() throws Exception
     {
+        testWritingVectorData(CQL3Type.Native.FLOAT, FloatType.instance, (i) -> (float) i, (i, vector) -> {
+            assertThat(vector).allMatch(val -> val instanceof Float);
+            assertThat(vector).allMatch(val -> (float) val == (float) i);
+        });
+
+        perTestSetup();
+
+        testWritingVectorData(CQL3Type.Native.DATE, SimpleDateType.instance, LocalDate::fromDaysSinceEpoch, (i, vector) -> {
+            assertThat(vector).allMatch(val -> val instanceof Integer);
+            assertThat(vector).allMatch(val -> {
+                int days = (int) val - Integer.MIN_VALUE; // signed to unsigned conversion
+                return days == i;
+            });
+        });
+
+        perTestSetup();
+
+        testWritingVectorData(CQL3Type.Native.TIME, TimeType.instance, (i) -> (long) i, (i, vector) -> {
+            assertThat(vector).allMatch(val -> val instanceof Long);
+            assertThat(vector).allMatch(val -> (long) val == (long) i);
+        });
+    }
+
+    private void testWritingVectorData(CQL3Type.Native cqlType, AbstractType<?> subType, Function<Integer, ?> valueFactory,
+                                       BiConsumer<Integer, List<?>> checkFunction) throws Exception
+    {
+        final int dimensions = 5;
         final String schema = "CREATE TABLE " + qualifiedTable + " ("
                               + "  k int,"
-                              + "  v1 VECTOR<FLOAT, 5>,"
+                              + "  v1 VECTOR<" + cqlType.name() + ", " + dimensions + ">,"
                               + "  PRIMARY KEY (k)"
                               + ")";
 
@@ -1630,7 +1669,12 @@ public abstract class CQLSSTableWriterTest
 
         for (int i = 0; i < 100; i++)
         {
-            writer.addRow(i, List.of( (float)i, (float)i, (float)i, (float)i, (float)i));
+            List<Object> vector = new ArrayList<>(dimensions);
+            for (int j = 0; j < dimensions; j++)
+            {
+                vector.add(valueFactory.apply(i));
+            }
+            writer.addRow(i, vector);
         }
 
         writer.close();
@@ -1645,10 +1689,9 @@ public abstract class CQLSSTableWriterTest
             for (UntypedResultSet.Row row : resultSet)
             {
                 assertEquals(cnt, row.getInt("k"));
-                List<Float> vector = row.getVector("v1", FloatType.instance, 5);
-                assertThat(vector).hasSize(5);
-                final float floatCount = (float)cnt;
-                assertThat(vector).allMatch(val -> val == floatCount);
+                List<?> vector = row.getVector("v1", subType, dimensions);
+                assertThat(vector).hasSize(dimensions);
+                checkFunction.accept(cnt, vector);
                 cnt++;
             }
         }
@@ -1671,7 +1714,7 @@ public abstract class CQLSSTableWriterTest
 
         writer.addRow(1, 4);
 
-        Assertions.assertThatThrownBy(() -> writer.addRow(2, 11))
+        assertThatThrownBy(() -> writer.addRow(2, 11))
         .describedAs("Should throw when adding a row that violates constraints")
         .isInstanceOf(ConstraintViolationException.class)
         .hasMessageContaining("Column value does not satisfy value constraint for column 'v1'. It should be v1 < 5");
@@ -1687,6 +1730,68 @@ public abstract class CQLSSTableWriterTest
             UntypedResultSet.Row row = resultSet.one();
             assertEquals(1, row.getInt("k"));
             assertEquals(4, row.getInt("v1"));
+        }
+    }
+
+    @Test
+    public void testWritingWithZstdDictionaryWhenUsingInvalidCompressor()
+    {
+        // the compressor is not dictionary-aware so we will fail
+        final String schema = "CREATE TABLE " + qualifiedTable + " ("
+                              + "  k int,"
+                              + "  v1 text,"
+                              + "  PRIMARY KEY (k)"
+                              + ") WITH compression = {'class': 'ZstdCompressor'}";
+
+        assertThatThrownBy(() -> CQLSSTableWriter.builder()
+                                                 .inDirectory(dataDir)
+                                                 .forTable(schema)
+                                                 .using("INSERT INTO " + keyspace + '.' + table + " (k, v1) VALUES (?, ?)")
+                                                 // does not matter, we will fail anyway
+                                                 .withCompressionDictionary(new ZstdCompressionDictionary(new DictId(ZSTD, 1), new byte[0]))
+                                                 .build())
+        .hasMessage("Table's compressor can not accept any dictionary: {chunk_length_in_kb=16, class=org.apache.cassandra.io.compress.ZstdCompressor}")
+        .isInstanceOf(IllegalStateException.class);
+    }
+
+    @Test
+    public void testWritingWithZstdDictionary() throws Exception
+    {
+        final String schema = "CREATE TABLE " + qualifiedTable + " ("
+                              + "  k int,"
+                              + "  v1 text,"
+                              + "  PRIMARY KEY (k)"
+                              + ") WITH compression = {'class': 'ZstdDictionaryCompressor'}";
+
+        CompressionDictionary dictionary = CompressionDictionaryHelper.INSTANCE.trainDictionary(keyspace, table);
+
+        CQLSSTableWriter writer = CQLSSTableWriter.builder()
+                                                  .inDirectory(dataDir)
+                                                  .forTable(schema)
+                                                  .using("INSERT INTO " + keyspace + '.' + table + " (k, v1) VALUES (?, ?)")
+                                                  .withCompressionDictionary(dictionary)
+                                                  .build();
+
+        for (int i = 0; i < 500; i++)
+        {
+            writer.addRow(i, CompressionDictionaryHelper.INSTANCE.getRandomSample());
+        }
+
+        writer.close();
+
+        loadSSTables(dataDir, keyspace, table);
+
+        if (verifyDataAfterLoading)
+        {
+            UntypedResultSet resultSet = QueryProcessor.executeInternal("SELECT * FROM " + qualifiedTable);
+            assertNotNull(resultSet);
+            Iterator<UntypedResultSet.Row> iter = resultSet.iterator();
+            for (int i = 0; i < 500; i++)
+            {
+                UntypedResultSet.Row row = iter.next();
+                assertEquals(i, row.getInt("k"));
+                assertNotNull(row.getString("v1"));
+            }
         }
     }
 

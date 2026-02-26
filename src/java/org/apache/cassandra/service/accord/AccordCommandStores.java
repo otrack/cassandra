@@ -20,6 +20,7 @@ package org.apache.cassandra.service.accord;
 import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Stream;
 
 import accord.api.Agent;
 import accord.api.DataStore;
@@ -27,19 +28,17 @@ import accord.api.Journal;
 import accord.api.LocalListeners;
 import accord.api.ProgressLog;
 import accord.local.CommandStores;
-import accord.local.Node;
 import accord.local.NodeCommandStoreService;
 import accord.local.SequentialAsyncExecutor;
 import accord.local.ShardDistributor;
-import accord.primitives.Range;
-import accord.topology.Topology;
 import accord.utils.RandomSource;
+
 import org.apache.cassandra.cache.CacheSize;
+import org.apache.cassandra.concurrent.ScheduledExecutors;
+import org.apache.cassandra.concurrent.Shutdownable;
 import org.apache.cassandra.config.AccordSpec.QueueShardModel;
 import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.schema.TableId;
 import org.apache.cassandra.service.accord.AccordExecutor.AccordExecutorFactory;
-import org.apache.cassandra.service.accord.api.TokenKey;
 
 import static org.apache.cassandra.config.AccordSpec.QueueShardModel.THREAD_PER_SHARD;
 import static org.apache.cassandra.config.DatabaseDescriptor.getAccordQueueShardCount;
@@ -47,8 +46,9 @@ import static org.apache.cassandra.config.DatabaseDescriptor.getAccordQueueSubmi
 import static org.apache.cassandra.service.accord.AccordExecutor.Mode.RUN_WITHOUT_LOCK;
 import static org.apache.cassandra.service.accord.AccordExecutor.Mode.RUN_WITH_LOCK;
 import static org.apache.cassandra.service.accord.AccordExecutor.constant;
+import static org.apache.cassandra.utils.Clock.Global.nanoTime;
 
-public class AccordCommandStores extends CommandStores implements CacheSize
+public class AccordCommandStores extends CommandStores implements CacheSize, Shutdownable
 {
     private final AccordExecutor[] executors;
     private final int mask;
@@ -71,6 +71,14 @@ public class AccordCommandStores extends CommandStores implements CacheSize
         maxQueuedRangeLoads = DatabaseDescriptor.getAccordMaxQueuedRangeLoadCount();
         shrinkingOn = DatabaseDescriptor.getAccordCacheShrinkingOn();
         refreshCapacities();
+        ScheduledExecutors.scheduledFastTasks.scheduleWithFixedDelay(() -> {
+            for (AccordExecutor executor : executors)
+            {
+                executor.executeDirectlyWithLock(() -> {
+                    executor.cacheExclusive().processNoEvictQueue();
+                });
+            }
+        }, 1L, 1L, TimeUnit.SECONDS);
     }
 
     static Factory factory()
@@ -113,30 +121,10 @@ public class AccordCommandStores extends CommandStores implements CacheSize
     }
 
     @Override
-    protected boolean shouldBootstrap(Node node, Topology previous, Topology updated, Range range)
-    {
-        if (!super.shouldBootstrap(node, previous, updated, range))
-            return false;
-        // we see new ranges when a new keyspace is added, so avoid bootstrap in these cases
-        return contains(previous, ((TokenKey)  range.start()).table());
-    }
-
-    @Override
     public SequentialAsyncExecutor someSequentialExecutor()
     {
         int idx = ((int) Thread.currentThread().getId()) & mask;
         return executors[idx].newSequentialExecutor();
-    }
-
-    private static boolean contains(Topology previous, TableId searchTable)
-    {
-        for (Range range : previous.ranges())
-        {
-            TableId table = ((TokenKey)  range.start()).table();
-            if (table.equals(searchTable))
-                return true;
-        }
-        return false;
     }
 
     public synchronized void setCapacity(long bytes)
@@ -216,10 +204,16 @@ public class AccordCommandStores extends CommandStores implements CacheSize
         return Arrays.asList(executors.clone());
     }
 
-    public void waitForQuiescense()
+    public void waitForQuiescence()
     {
         for (AccordExecutor executor : this.executors)
             executor.waitForQuiescence();
+    }
+
+    @Override
+    public boolean isTerminated()
+    {
+        return Stream.of(executors).allMatch(AccordExecutor::isTerminated);
     }
 
     @Override
@@ -227,17 +221,26 @@ public class AccordCommandStores extends CommandStores implements CacheSize
     {
         super.shutdown();
         for (AccordExecutor executor : executors)
-        {
             executor.shutdown();
-            try
-            {
-                executor.awaitTermination(1, TimeUnit.MINUTES);
-            }
-            catch (InterruptedException e)
-            {
-                throw new RuntimeException(e);
-            }
+    }
+
+    @Override
+    public Object shutdownNow()
+    {
+        shutdown();
+        return null;
+    }
+
+    @Override
+    public boolean awaitTermination(long timeout, TimeUnit units) throws InterruptedException
+    {
+        long deadline = nanoTime() + units.toNanos(timeout);
+        for (AccordExecutor executor : executors)
+        {
+            long wait = Math.max(1, deadline - nanoTime());
+            if (!executor.awaitTermination(wait, TimeUnit.NANOSECONDS))
+                return false;
         }
-        //TODO (expected): shutdown isn't useful by itself, we need a way to "wait" as well.  Should be AutoCloseable or offer awaitTermination as well (think Shutdownable interface)
+        return true;
     }
 }

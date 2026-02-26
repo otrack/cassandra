@@ -1,3 +1,12 @@
+**CRITICAL: UPGRADING**
+----------------------
+
+In order to support the new Cluster Metadata Service, added to Apache Cassandra
+in "CEP-21: Transactional Cluster Metadata", upgrading to this version of
+Cassandra involves operational steps above and beyond most previous upgrades.
+See the instructions below in the "Upgrading" section for more details on how
+to proceed.
+
 PLEASE READ: MAXIMUM TTL EXPIRATION DATE NOTICE (CASSANDRA-14092 & CASSANDRA-14227)
 -----------------------------------------------------------------------------------
 (General upgrading instructions are available in the next section)
@@ -71,6 +80,9 @@ using the provided 'sstableupgrade' tool.
 
 New features
 ------------
+    - JDK21 and Generational ZGC are now officially supported and generational ZGC is now the default Garbage Collector
+    when using JDK21. See jvm21-server.options for more details and configuration parameters. We do not recommend using
+    non-generational ZGC with Apache Cassandra.
     [The following is a placeholder, to be revised asap]
     - CEP-37 Auto Repair is a fully automated scheduler that provides repair orchestration within Apache Cassandra. This
     significantly reduces operational overhead by eliminating the need for operators to deploy external tools to submit
@@ -87,15 +99,19 @@ New features
     More updates and documentation to follow.
     - New Guardrails added:
       - Whether bulk loading of SSTables is allowed.
+      - Allowed keyspace properties.
     - nodetool tpstats can display core pool size, max pool size and max tasks queued if --verbose / -v flag is specified.
       system_views.thread_pools adds core_pool_size, max_pool_size and max_tasks_queued columns.
     - Authentication mode is exposed in system_views.clients table, nodetool clientstats and ClientMetrics 
       to help operators identify which authentication modes are being used. nodetool clientstats introduces --verbose flag 
       behind which this information is visible.
-    - CEP-24 - Password validation / generation. When built-in 'password_validator' guardrail is enabled, it will
+    - CEP-24 - Password validation / generation. When built-in 'password_policy' guardrail is enabled, it will
       generate a password of configured password strength policy upon role creation or alteration
       when 'GENERATED PASSWORD' clause is used. Character sets supported are: English, Cyrillic, modern Cyrillic,
       German, Polish and Czech.
+    - CEP-55 - Role name generation and validation. When built-in 'role_name_policy' guardrail is enabled, it will
+      generate a role name automatically, without operators intervention. It is possible to configure
+      this policy for both generation and as well as validation of role names.
     - There is new MBean of name org.apache.cassandra.service.snapshot:type=SnapshotManager which exposes user-facing
       snapshot operations. Snapshot-related methods on StorageServiceMBean are still present and functional
       but marked as deprecated.
@@ -122,6 +138,8 @@ New features
       CASSANDRA-20102 adds a subset of the SQL99 (binary) string functions: "octet_length" defined on all types 
       and "length" defined on UTF8 strings. See CASSANDRA-20102 for more information.
     - New functions `format_bytes` and `format_time` were added. See CASSANDRA-19546.
+    - It is possible to use Async-profiler for various profiling scenarios. See CASSANDRA-20854.
+    - It is possible to provide custom startup check via Java SPI. See CASSANDRA-21093.
 
 Upgrading
 ---------
@@ -190,6 +208,11 @@ Upgrading
 Deprecation
 -----------
     - `use_deterministic_table_id` is no longer supported and should be removed from cassandra.yaml. Table IDs may still be supplied explicitly on CREATE.
+    - Updating dependencies for JDK21 necessitated updating Chronicle Queue, which has changed the enums used for log
+    rolling (cassandra.yaml -> full_query_logging_options:roll_cycle). Older legacy options will still work for the
+    foreseeable future but you will see warnings in logs and future dependency upgrades may break your log rolling param.
+    The default log rolling param has been changed from HOURLY to FAST_HOURLY, primarily different on how frequently
+    indexes are built (256 in FAST_HOURLY vs. 16 in HOURLY).
     - IEndpointSnitch has been deprecated as ClusterMetadata is now the source of truth regarding topology information.
       The responsibilities of the snitch have been broken out to a handful of new classes:
       * o.a.c.locator.Locator provides datacenter and rack info for endpoints. This is not configurable as topology is

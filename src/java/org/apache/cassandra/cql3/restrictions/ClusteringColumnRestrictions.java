@@ -17,22 +17,26 @@
  */
 package org.apache.cassandra.cql3.restrictions;
 
-import java.util.*;
+import java.util.List;
+import java.util.NavigableSet;
 
 import javax.annotation.Nullable;
 
 import com.google.common.collect.RangeSet;
 
+import org.apache.cassandra.cql3.QueryOptions;
+import org.apache.cassandra.db.Clustering;
+import org.apache.cassandra.db.ClusteringComparator;
+import org.apache.cassandra.db.MultiCBuilder;
+import org.apache.cassandra.db.Slices;
 import org.apache.cassandra.db.filter.IndexHints;
+import org.apache.cassandra.db.filter.RowFilter;
 import org.apache.cassandra.db.guardrails.Guardrails;
 import org.apache.cassandra.dht.IPartitioner;
-import org.apache.cassandra.schema.ColumnMetadata;
-import org.apache.cassandra.schema.TableMetadata;
-import org.apache.cassandra.cql3.QueryOptions;
-import org.apache.cassandra.db.*;
-import org.apache.cassandra.db.filter.RowFilter;
 import org.apache.cassandra.exceptions.InvalidRequestException;
 import org.apache.cassandra.index.IndexRegistry;
+import org.apache.cassandra.schema.ColumnMetadata;
+import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.service.ClientState;
 
 import static org.apache.cassandra.cql3.statements.RequestValidations.checkFalse;
@@ -100,6 +104,14 @@ final class ClusteringColumnRestrictions extends RestrictionSetWrapper
 
     public NavigableSet<Clustering<?>> valuesAsClustering(QueryOptions options, ClientState state) throws InvalidRequestException
     {
+        // fast path, a typical case when a single full restriction is used
+        // for example, when we specify a single clustering key (a single row) to insert/update
+        if (restrictions.size() == 1 && !restrictions.hasIN())
+        {
+            SingleRestriction r = restrictions.lastRestriction();
+            List<ClusteringElements> values = r.values(options);
+            return MultiCBuilder.build(comparator, values);
+        }
         MultiCBuilder builder = new MultiCBuilder(comparator);
         for (SingleRestriction r : restrictions)
         {

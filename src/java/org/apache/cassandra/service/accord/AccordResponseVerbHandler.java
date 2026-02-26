@@ -25,6 +25,7 @@ import org.slf4j.LoggerFactory;
 import accord.impl.RequestCallbacks;
 import accord.local.Node;
 import accord.messages.Reply;
+
 import org.apache.cassandra.exceptions.RequestFailure;
 import org.apache.cassandra.exceptions.RequestFailureReason;
 import org.apache.cassandra.net.IVerbHandler;
@@ -54,13 +55,13 @@ class AccordResponseVerbHandler<T extends Reply> implements IVerbHandler<T>
     @Override
     public void doVerb(Message message)
     {
-        if (!AccordService.instance().shouldAcceptMessages())
+        Node.Id from = endpointMapper.mappedIdOrNull(message.from(), message);
+        if (from == null)
         {
             dropping.debug(message.verb(), message.from());
             return;
         }
 
-        Node.Id from = endpointMapper.mappedId(message.from());
         logger.trace("Receiving {} from {}", message.payload, message.from());
         if (message.isFailureResponse())
         {

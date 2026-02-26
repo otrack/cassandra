@@ -26,15 +26,18 @@ import java.util.stream.Collectors;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Objects;
 import com.google.common.io.Files;
+
+import org.apache.lucene.store.IndexInput;
+import org.apache.lucene.util.IOUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.db.ClusteringComparator;
 import org.apache.cassandra.db.lifecycle.ILifecycleTransaction;
 import org.apache.cassandra.dht.IPartitioner;
-import org.apache.cassandra.index.sai.StorageAttachedIndex;
 import org.apache.cassandra.index.sai.IndexValidation;
 import org.apache.cassandra.index.sai.SSTableContext;
+import org.apache.cassandra.index.sai.StorageAttachedIndex;
 import org.apache.cassandra.index.sai.disk.PerColumnIndexWriter;
 import org.apache.cassandra.index.sai.disk.PerSSTableIndexWriter;
 import org.apache.cassandra.index.sai.disk.PrimaryKeyMap;
@@ -52,8 +55,6 @@ import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.io.util.FileHandle;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.Throwables;
-import org.apache.lucene.store.IndexInput;
-import org.apache.lucene.util.IOUtils;
 
 /**
  * The {@link IndexDescriptor} is an analog of the SSTable {@link Descriptor} and provides version
@@ -268,7 +269,7 @@ public class IndexDescriptor
             if (logger.isTraceEnabled())
                 logger.trace(logMessage("Opening file handle for {} ({})"), file, FBUtilities.prettyPrintMemory(file.length()));
 
-            return new FileHandle.Builder(file).mmapped(true).complete();
+            return new FileHandle.Builder(file).mmapped().complete();
         }
         catch (Throwable t)
         {
@@ -290,7 +291,7 @@ public class IndexDescriptor
             if (logger.isTraceEnabled())
                 logger.trace(logMessage("Opening file handle for {} ({})"), file, FBUtilities.prettyPrintMemory(file.length()));
 
-            return new FileHandle.Builder(file).mmapped(true).complete();
+            return new FileHandle.Builder(file).mmapped().complete();
         }
         catch (Throwable t)
         {

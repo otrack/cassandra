@@ -32,6 +32,7 @@ import java.util.stream.Stream;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Sets;
 import com.google.common.collect.Streams;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -96,6 +97,11 @@ public class AlterSchema implements Transformation
     public Kind kind()
     {
         return Kind.SCHEMA_CHANGE;
+    }
+
+    public boolean eligibleToCommit(ClusterMetadata metadata)
+    {
+        return schemaTransformation.compatibleWith(metadata);
     }
 
     @Override

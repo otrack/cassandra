@@ -19,6 +19,7 @@ package org.apache.cassandra.db.rows;
 
 import java.nio.ByteBuffer;
 import java.util.Objects;
+
 import javax.annotation.Nonnull;
 
 import com.google.common.base.Function;
@@ -50,12 +51,12 @@ public abstract class AbstractCell<V> extends Cell<V>
 
     public boolean isCounterCell()
     {
-        return !isTombstone() && column.isCounterColumn();
+        return column.isCounterColumn() && !isTombstone();
     }
 
     public boolean isLive(long nowInSec)
     {
-        return localDeletionTime() == NO_DELETION_TIME || (ttl() != NO_TTL && nowInSec < localDeletionTime());
+        return isLive(nowInSec, localDeletionTime(), ttl());
     }
 
     public boolean isTombstone()
@@ -114,6 +115,18 @@ public abstract class AbstractCell<V> extends Cell<V>
         return new BufferCell(column, timestamp(), ttl(), localDeletionTime(), cloner.clone(buffer()), path == null ? null : path.clone(cloner));
     }
 
+    public static int estimateAllocationSize(Cell<?> cell)
+    {
+        long size = cell.valueSize();
+        CellPath path = cell.path();
+        if (path != null)
+        {
+            assert path.size() == 1 : String.format("Expected path size to be 1 but was not; %s", path);
+            size += path.get(0).remaining();
+        }
+        return (int) size;
+    }
+
     // note: while the cell returned may be different, the value is the same, so if the value is offheap it must be referenced inside a guarded context (or copied)
     public Cell<?> updateAllTimestamp(long newTimestamp)
     {
@@ -137,9 +150,10 @@ public abstract class AbstractCell<V> extends Cell<V>
     public int dataSize()
     {
         CellPath path = path();
-        return TypeSizes.sizeof(timestamp())
-               + TypeSizes.sizeof(ttl())
-               + TypeSizes.sizeof(localDeletionTime())
+        // NOTE: TypeSizes.sizeof(localDeletionTime()) - method call like this is not eliminated by JIT in case of a megamorphic call
+        return TypeSizes.LONG_SIZE // timestamp()
+               + TypeSizes.INT_SIZE // ttl()
+               + TypeSizes.LONG_SIZE // localDeletionTime()
                + valueSize()
                + (path == null ? 0 : path.dataSize());
     }

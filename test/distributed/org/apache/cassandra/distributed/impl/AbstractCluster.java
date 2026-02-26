@@ -45,6 +45,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executor;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.function.BiConsumer;
 import java.util.function.BiPredicate;
 import java.util.function.Consumer;
 import java.util.function.Function;
@@ -52,6 +53,7 @@ import java.util.function.Predicate;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
+
 import javax.annotation.Nullable;
 import javax.annotation.concurrent.GuardedBy;
 
@@ -59,7 +61,12 @@ import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Throwables;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.LinkedHashMultimap;
+
 import org.junit.Assume;
+import org.reflections.Reflections;
+import org.reflections.scanners.Scanners;
+import org.reflections.util.ConfigurationBuilder;
+import org.reflections.util.NameHelper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -100,10 +107,6 @@ import org.apache.cassandra.utils.Isolated;
 import org.apache.cassandra.utils.Shared;
 import org.apache.cassandra.utils.Shared.Recursive;
 import org.apache.cassandra.utils.concurrent.Condition;
-import org.reflections.Reflections;
-import org.reflections.scanners.Scanners;
-import org.reflections.util.ConfigurationBuilder;
-import org.reflections.util.NameHelper;
 
 import static java.util.stream.Stream.of;
 import static org.apache.cassandra.distributed.impl.IsolatedExecutor.DEFAULT_SHUTDOWN_EXECUTOR;
@@ -197,7 +200,12 @@ public abstract class AbstractCluster<I extends IInstance> implements ICluster<I
             CassandraRelevantProperties.TEST_FLUSH_LOCAL_SCHEMA_CHANGES.reset();
             CassandraRelevantProperties.NON_GRACEFUL_SHUTDOWN.reset();
             CassandraRelevantProperties.IO_NETTY_TRANSPORT_NONATIVE.setBoolean(false);
-            withInstanceInitializer((classLoader, threadGroup, i, i1) -> {
+            withInstanceInitializer(defaultInitializer());
+        }
+
+        private IInstanceInitializer defaultInitializer()
+        {
+            return (classLoader, threadGroup, i, i1) -> {
                 try
                 {
                     Class<?> ef = classLoader.loadClass(ExecutorFactory.class.getName());
@@ -215,10 +223,21 @@ public abstract class AbstractCluster<I extends IInstance> implements ICluster<I
                     else
                         logger.info("Unable to set ExecutorFactory for instance {}", i, e);
                 }
-                catch (NoSuchMethodException | InvocationTargetException | InstantiationException | IllegalAccessException e)
+                catch (NoSuchMethodException | InvocationTargetException | InstantiationException |
+                       IllegalAccessException e)
                 {
                     throw new RuntimeException(e);
                 }
+            };
+        }
+
+        @Override
+        public B withInstanceInitializer(BiConsumer<ClassLoader, Integer> instanceInitializer)
+        {
+            IInstanceInitializer wrap = defaultInitializer();
+            return withInstanceInitializer((classLoader, threadGroup, num, v) -> {
+                wrap.initialise(classLoader, threadGroup, num, v);
+                instanceInitializer.accept(classLoader, num);
             });
         }
 
@@ -226,12 +245,6 @@ public abstract class AbstractCluster<I extends IInstance> implements ICluster<I
         {
             super(factory);
             withSharedClasses(SHARED_PREDICATE);
-        }
-
-        @SuppressWarnings("unchecked")
-        private B self()
-        {
-            return (B) this;
         }
 
         public B withNodeProvisionStrategy(INodeProvisionStrategy.Factory nodeProvisionStrategy)
@@ -579,6 +592,10 @@ public abstract class AbstractCluster<I extends IInstance> implements ICluster<I
 
     protected AbstractCluster(AbstractBuilder<I, ? extends ICluster<I>, ?> builder)
     {
+        // start the JNA cleaner on the system class loader to avoid pinning an instance
+        // (we do it here because startup() isn't always called)
+        com.sun.jna.internal.Cleaner.getCleaner();
+
         this.root = builder.getRootPath();
         this.sharedClassLoader = builder.getSharedClassLoader();
         this.sharedClassPredicate = builder.getSharedClasses();
@@ -618,7 +635,7 @@ public abstract class AbstractCluster<I extends IInstance> implements ICluster<I
     }
 
     @VisibleForTesting
-    InstanceConfig createInstanceConfig(int nodeNum)
+    public InstanceConfig createInstanceConfig(int nodeNum)
     {
         INodeProvisionStrategy provisionStrategy = nodeProvisionStrategy.create(subnet, portMap);
         Collection<String> tokens = tokenSupplier.tokens(nodeNum);
@@ -701,6 +718,17 @@ public abstract class AbstractCluster<I extends IInstance> implements ICluster<I
         }
 
         return instance;
+    }
+
+    public synchronized void unsafeRemoveNode(I toRemove)
+    {
+        instances.remove(toRemove);
+        instanceMap.remove(toRemove.broadcastAddress(), toRemove);
+    }
+
+    public void unsafeUpdateNodeIdTopology(int num, NetworkTopology.DcAndRack location)
+    {
+        nodeIdTopology.put(num, location);
     }
 
     /**
@@ -1063,8 +1091,6 @@ public abstract class AbstractCluster<I extends IInstance> implements ICluster<I
 
     public void startup()
     {
-        // start the JNA cleaner on the system class loader to avoid pinning an instance
-        com.sun.jna.internal.Cleaner.getCleaner();
         try (AllMembersAliveMonitor monitor = new AllMembersAliveMonitor())
         {
             monitor.startPolling();

@@ -25,8 +25,6 @@ import java.util.Set;
 
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableMap;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import accord.api.AsyncExecutor;
 import accord.api.MessageSink;
@@ -39,6 +37,7 @@ import accord.messages.ReplyContext;
 import accord.messages.Request;
 import accord.primitives.TxnId;
 import accord.utils.async.Cancellable;
+
 import org.apache.cassandra.exceptions.RequestFailureReason;
 import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.net.Message;
@@ -48,10 +47,50 @@ import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.net.ResponseContext;
 import org.apache.cassandra.net.Verb;
 import org.apache.cassandra.service.TimeoutStrategy;
-import org.apache.cassandra.service.accord.api.AccordAgent;
 import org.apache.cassandra.utils.Clock;
 
-import static accord.messages.MessageType.StandardMessage.*;
+import static accord.messages.MessageType.StandardMessage.ACCEPT_REQ;
+import static accord.messages.MessageType.StandardMessage.ACCEPT_RSP;
+import static accord.messages.MessageType.StandardMessage.APPLY_REQ;
+import static accord.messages.MessageType.StandardMessage.APPLY_RSP;
+import static accord.messages.MessageType.StandardMessage.APPLY_THEN_WAIT_UNTIL_APPLIED_REQ;
+import static accord.messages.MessageType.StandardMessage.ASYNC_AWAIT_COMPLETE_REQ;
+import static accord.messages.MessageType.StandardMessage.AWAIT_REQ;
+import static accord.messages.MessageType.StandardMessage.AWAIT_RSP;
+import static accord.messages.MessageType.StandardMessage.BEGIN_INVALIDATE_REQ;
+import static accord.messages.MessageType.StandardMessage.BEGIN_INVALIDATE_RSP;
+import static accord.messages.MessageType.StandardMessage.BEGIN_RECOVER_REQ;
+import static accord.messages.MessageType.StandardMessage.BEGIN_RECOVER_RSP;
+import static accord.messages.MessageType.StandardMessage.CHECK_STATUS_REQ;
+import static accord.messages.MessageType.StandardMessage.CHECK_STATUS_RSP;
+import static accord.messages.MessageType.StandardMessage.COMMIT_INVALIDATE_REQ;
+import static accord.messages.MessageType.StandardMessage.COMMIT_REQ;
+import static accord.messages.MessageType.StandardMessage.FAILURE_RSP;
+import static accord.messages.MessageType.StandardMessage.FETCH_DATA_REQ;
+import static accord.messages.MessageType.StandardMessage.FETCH_DATA_RSP;
+import static accord.messages.MessageType.StandardMessage.GET_DURABLE_BEFORE_REQ;
+import static accord.messages.MessageType.StandardMessage.GET_DURABLE_BEFORE_RSP;
+import static accord.messages.MessageType.StandardMessage.GET_EPHEMERAL_READ_DEPS_REQ;
+import static accord.messages.MessageType.StandardMessage.GET_EPHEMERAL_READ_DEPS_RSP;
+import static accord.messages.MessageType.StandardMessage.GET_LATEST_DEPS_REQ;
+import static accord.messages.MessageType.StandardMessage.GET_LATEST_DEPS_RSP;
+import static accord.messages.MessageType.StandardMessage.GET_MAX_CONFLICT_REQ;
+import static accord.messages.MessageType.StandardMessage.GET_MAX_CONFLICT_RSP;
+import static accord.messages.MessageType.StandardMessage.INFORM_DURABLE_REQ;
+import static accord.messages.MessageType.StandardMessage.NOT_ACCEPT_REQ;
+import static accord.messages.MessageType.StandardMessage.PRE_ACCEPT_REQ;
+import static accord.messages.MessageType.StandardMessage.PRE_ACCEPT_RSP;
+import static accord.messages.MessageType.StandardMessage.READ_EPHEMERAL_REQ;
+import static accord.messages.MessageType.StandardMessage.READ_REQ;
+import static accord.messages.MessageType.StandardMessage.READ_RSP;
+import static accord.messages.MessageType.StandardMessage.RECOVER_AWAIT_REQ;
+import static accord.messages.MessageType.StandardMessage.RECOVER_AWAIT_RSP;
+import static accord.messages.MessageType.StandardMessage.SET_GLOBALLY_DURABLE_REQ;
+import static accord.messages.MessageType.StandardMessage.SET_SHARD_DURABLE_REQ;
+import static accord.messages.MessageType.StandardMessage.SIMPLE_RSP;
+import static accord.messages.MessageType.StandardMessage.STABLE_THEN_READ_REQ;
+import static accord.messages.MessageType.StandardMessage.StandardMessage;
+import static accord.messages.MessageType.StandardMessage.WAIT_UNTIL_APPLIED_REQ;
 import static java.util.concurrent.TimeUnit.NANOSECONDS;
 import static org.apache.cassandra.service.accord.api.AccordWaitStrategies.expire;
 import static org.apache.cassandra.service.accord.api.AccordWaitStrategies.slowPreaccept;
@@ -59,8 +98,6 @@ import static org.apache.cassandra.service.accord.api.AccordWaitStrategies.slowR
 
 public class AccordMessageSink implements MessageSink
 {
-    private static final Logger logger = LoggerFactory.getLogger(AccordMessageSink.class);
-
     public enum AccordMessageType implements MessageType
     {
         INTEROP_READ_REQ(Verb.ACCORD_INTEROP_READ_REQ),
@@ -150,22 +187,20 @@ public class AccordMessageSink implements MessageSink
         }
     }
 
-    private final AccordAgent agent;
     private final MessageDelivery messaging;
     private final AccordEndpointMapper endpointMapper;
     private final RequestCallbacks callbacks;
 
-    public AccordMessageSink(AccordAgent agent, MessageDelivery messaging, AccordEndpointMapper endpointMapper, RequestCallbacks callbacks)
+    public AccordMessageSink(MessageDelivery messaging, AccordEndpointMapper endpointMapper, RequestCallbacks callbacks)
     {
-        this.agent = agent;
         this.messaging = messaging;
         this.endpointMapper = endpointMapper;
         this.callbacks = callbacks;
     }
 
-    public AccordMessageSink(AccordAgent agent, AccordConfigurationService endpointMapper, RequestCallbacks callbacks)
+    public AccordMessageSink(AccordEndpointMapper endpointMapper, RequestCallbacks callbacks)
     {
-        this(agent, MessagingService.instance(), endpointMapper, callbacks);
+        this(MessagingService.instance(), endpointMapper, callbacks);
     }
 
     @Override
@@ -174,8 +209,10 @@ public class AccordMessageSink implements MessageSink
         Verb verb = VerbMapping.getVerb(request);
         Preconditions.checkNotNull(verb, "Verb is null for type %s", request.type());
         Message<Request> message = Message.out(verb, request);
-        InetAddressAndPort endpoint = endpointMapper.mappedEndpoint(to);
-        logger.trace("Sending {} {} to {}", verb, message.payload, endpoint);
+        InetAddressAndPort endpoint = endpointMapper.mappedEndpointOrNull(to, message);
+        if (endpoint == null)
+            return;
+
         messaging.send(message, endpoint);
     }
 
@@ -213,34 +250,43 @@ public class AccordMessageSink implements MessageSink
         }
 
         Message<Request> message = Message.out(verb, request, expiresAtNanos);
-        InetAddressAndPort endpoint = endpointMapper.mappedEndpoint(to);
-        logger.trace("Sending {} {} to {}", verb, message.payload, endpoint);
+        InetAddressAndPort endpoint = endpointMapper.mappedEndpointOrNull(to, message);
+        if (endpoint == null)
+        {
+            executor.execute(() -> callback.onFailure(to, null));
+            return null;
+        }
+
         Cancellable cancellable = callbacks.registerAt(message.id(), executor, callback, to, nowNanos, slowAtNanos, expiresAtNanos, NANOSECONDS);
         messaging.send(message, endpoint);
         return cancellable;
     }
 
     @Override
-    public void reply(Node.Id replyingToNode, ReplyContext replyContext, Reply reply)
+    public void reply(Node.Id replyingTo, ReplyContext replyContext, Reply reply)
     {
         ResponseContext respondTo = (ResponseContext) replyContext;
-        Message<?> responseMsg = Message.responseWith(reply, respondTo);
+        Message<?> message = Message.responseWith(reply, respondTo);
         if (!reply.isFinal())
-            responseMsg = responseMsg.withFlag(MessageFlag.NOT_FINAL);
+            message = message.withFlag(MessageFlag.NOT_FINAL);
         checkReplyType(reply, respondTo);
-        InetAddressAndPort endpoint = endpointMapper.mappedEndpoint(replyingToNode);
-        logger.trace("Replying {} {} to {}", responseMsg.verb(), responseMsg.payload, endpoint);
-        messaging.send(responseMsg, endpoint);
+        InetAddressAndPort endpoint = endpointMapper.mappedEndpointOrNull(replyingTo, message);
+        if (endpoint == null)
+            return;
+
+        messaging.send(message, endpoint);
     }
 
     @Override
-    public void replyWithUnknownFailure(Node.Id replyingToNode, ReplyContext replyContext, Throwable failure)
+    public void replyWithUnknownFailure(Node.Id replyingTo, ReplyContext replyContext, Throwable failure)
     {
         ResponseContext respondTo = (ResponseContext) replyContext;
-        Message<?> responseMsg = Message.failureResponse(RequestFailureReason.UNKNOWN, failure, respondTo);
-        InetAddressAndPort endpoint = endpointMapper.mappedEndpoint(replyingToNode);
-        logger.trace("Replying with failure {} {} to {}", responseMsg.verb(), responseMsg.payload, endpoint);
-        messaging.send(responseMsg, endpoint);
+        Message<?> message = Message.failureResponse(RequestFailureReason.UNKNOWN, failure, respondTo);
+        InetAddressAndPort endpoint = endpointMapper.mappedEndpointOrNull(replyingTo, message);
+        if (endpoint == null)
+            return;
+
+        messaging.send(message, endpoint);
     }
 
     private static void checkReplyType(Reply reply, ResponseContext respondTo)

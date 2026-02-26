@@ -21,12 +21,13 @@ import java.util.Arrays;
 import java.util.HashSet;
 import java.util.Set;
 
+import com.datastax.driver.core.ResultSet;
 import com.google.common.collect.Iterables;
+
 import org.junit.After;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
-import com.datastax.driver.core.ResultSet;
 import org.apache.cassandra.ServerTestUtils;
 import org.apache.cassandra.Util;
 import org.apache.cassandra.config.DatabaseDescriptor;
@@ -575,6 +576,46 @@ public class GrantAndRevokeTest extends CQLTester
         executeNet(ProtocolVersion.CURRENT, format("GRANT SELECT PERMISSION ON KEYSPACE system_views TO %s", user));
         executeNet(ProtocolVersion.CURRENT, format("REVOKE SELECT PERMISSION ON KEYSPACE system_virtual_schema FROM %s", user));
         executeNet(ProtocolVersion.CURRENT, format("REVOKE SELECT PERMISSION ON KEYSPACE system_views FROM %s", user));
+    }
+
+    @Test
+    public void testCheckPermissionsAfterAuthorize() throws Throwable
+    {
+        useSuperUser();
+
+        executeNet("CREATE KEYSPACE check_permissions WITH replication = {'class': 'SimpleStrategy', 'replication_factor': '1'}");
+        executeNet("CREATE TABLE check_permissions.t1 (k int PRIMARY KEY)");
+        executeNet("INSERT INTO check_permissions.t1 (k) VALUES (1)");
+
+        executeNet(String.format("CREATE ROLE %s WITH LOGIN = TRUE AND password='%s'", user, pass));
+
+        final String simple_user = "simple_user";
+        executeNet(String.format("CREATE ROLE %s WITH LOGIN = TRUE AND password='%s'", simple_user, simple_user));
+        executeNet("GRANT AUTHORIZE ON check_permissions.t1 TO " + simple_user);
+
+        useUser(user, pass);
+        assertUnauthorizedQuery("User user has no SELECT permission on <table check_permissions.t1> or any of its parents",
+                                "SELECT * FROM check_permissions.t1");
+
+        useUser(simple_user, simple_user);
+        assertUnauthorizedQuery("User simple_user has no SELECT permission on <table check_permissions.t1> or any of its parents",
+                                "SELECT * FROM check_permissions.t1");
+        assertUnauthorizedQuery("User simple_user has no SELECT permission on <table check_permissions.t1> or any of its parents",
+                                "GRANT SELECT ON check_permissions.t1 TO " + user);
+
+        useUser(user, pass);
+        assertUnauthorizedQuery("User user has no SELECT permission on <table check_permissions.t1> or any of its parents",
+                                "SELECT * FROM check_permissions.t1");
+
+        useSuperUser();
+        executeNet("GRANT SELECT ON check_permissions.t1 TO " + simple_user);
+
+        useUser(simple_user, simple_user);
+        executeNet("SELECT * FROM check_permissions.t1");
+        executeNet("GRANT SELECT ON check_permissions.t1 TO " + user);
+
+        useUser(user, pass);
+        executeNet("SELECT * FROM check_permissions.t1");
     }
 
     private void maybeReadSystemTables(boolean superuser) throws Throwable

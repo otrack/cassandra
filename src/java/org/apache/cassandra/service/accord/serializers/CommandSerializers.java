@@ -52,6 +52,7 @@ import accord.utils.ArrayBuffers;
 import accord.utils.BitUtils;
 import accord.utils.Invariants;
 import accord.utils.VIntCoding;
+
 import org.apache.cassandra.db.TypeSizes;
 import org.apache.cassandra.db.marshal.ByteBufferAccessor;
 import org.apache.cassandra.db.marshal.ValueAccessor;
@@ -168,7 +169,7 @@ public class CommandSerializers
                     if (executeAt.equals(Timestamp.NONE))
                         return size + TypeSizes.sizeofUnsignedVInt(0L);
 
-                    size += TypeSizes.sizeofUnsignedVInt(executeAt.epoch() - txnId.epoch());
+                    size += TypeSizes.sizeofUnsignedVInt(1 + executeAt.epoch() - txnId.epoch());
                 }
                 size += TypeSizes.sizeofUnsignedVInt(executeAt.hlc() - txnId.hlc());
                 size += TypeSizes.sizeofUnsignedVInt(executeAt.node.id);

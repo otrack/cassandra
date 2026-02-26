@@ -28,6 +28,7 @@ import java.util.List;
 import java.util.Random;
 import java.util.Set;
 import java.util.TreeSet;
+import java.util.concurrent.Callable;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
@@ -37,6 +38,7 @@ import java.util.function.LongUnaryOperator;
 import java.util.function.Supplier;
 import java.util.stream.Stream;
 
+import org.agrona.collections.Int2ObjectHashMap;
 import org.apache.commons.lang3.ArrayUtils;
 import org.junit.After;
 import org.junit.Assert;
@@ -49,6 +51,7 @@ import accord.api.AsyncExecutor;
 import accord.api.DataStore;
 import accord.api.Journal;
 import accord.api.Key;
+import accord.api.OwnershipEventListener;
 import accord.api.ProgressLog;
 import accord.api.RoutingKey;
 import accord.api.Timeouts;
@@ -97,10 +100,11 @@ import accord.utils.AccordGens;
 import accord.utils.Gen;
 import accord.utils.Gens;
 import accord.utils.RandomSource;
+import accord.utils.SimpleBitSets;
 import accord.utils.SortedArrays;
 import accord.utils.UnhandledEnum;
 import accord.utils.async.AsyncChain;
-import org.agrona.collections.Int2ObjectHashMap;
+
 import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.dht.Murmur3Partitioner;
 import org.apache.cassandra.dht.Token;
@@ -202,7 +206,7 @@ public class CommandsForKeySerializerTest
             if (saveStatus.known.outcome() == Known.Outcome.Apply)
             {
                 if (txnId.is(Kind.Write))
-                    builder.writes(new Writes(txnId, executeAt, txn.keys(), new TxnWrite(TableMetadatas.none(), Collections.emptyList(), true)));
+                    builder.writes(new Writes(txnId, executeAt, txn.keys(), new TxnWrite(TableMetadatas.none(), Collections.emptyList(), SimpleBitSets.allSet(1))));
                 builder.result(new TxnData());
             }
             return builder;
@@ -643,7 +647,7 @@ public class CommandsForKeySerializerTest
                   null,
                   null,
                   ignore -> new ProgressLog.NoOpProgressLog(),
-                  ignore -> new DefaultLocalListeners(new DefaultRemoteListeners((a, b, c, d, e)->{}), DefaultLocalListeners.DefaultNotifySink.INSTANCE),
+                  ignore -> new DefaultLocalListeners(null, new DefaultRemoteListeners((a, b, c, d, e)->{}), DefaultLocalListeners.DefaultNotifySink.INSTANCE),
                   new EpochUpdateHolder());
         }
 
@@ -657,10 +661,10 @@ public class CommandsForKeySerializerTest
         @Override public Agent agent() { return this; }
         @Override public void execute(Runnable run) {}
         @Override public void shutdown() { }
-        @Override public void onFailedBootstrap(int attempts, String phase, Ranges ranges, Runnable retry, Throwable failure) { throw new UnsupportedOperationException(); }
-        @Override public void onStale(Timestamp staleSince, Ranges ranges) { throw new UnsupportedOperationException(); }
-        @Override public void onUncaughtException(Throwable t) { throw new UnsupportedOperationException(); }
-        @Override public void onCaughtException(Throwable t, String context) { throw new UnsupportedOperationException(); }
+        @Override public <T> AsyncChain<T> chain(Callable<T> call) { throw new UnsupportedOperationException(); }
+        @Override public OwnershipEventListener ownershipEvents() { return null; }
+        @Override public void onException(Throwable t) { throw new UnsupportedOperationException(); }
+        @Override public void onException(Throwable t, String context) { throw new UnsupportedOperationException(); }
         @Override public boolean rejectPreAccept(TimeService time, TxnId txnId) { throw new UnsupportedOperationException(); }
         @Override public long cfkHlcPruneDelta() { return 0; }
         @Override public int cfkPruneInterval() { return 0; }
@@ -672,6 +676,7 @@ public class CommandsForKeySerializerTest
         @Override public long slowReplicaDelay(Node node, SafeCommandStore safeStore, TxnId txnId, int retryCount, ProgressLog.BlockedUntil blockedUntil, TimeUnit units) { return 0; }
         @Override public long slowAwaitDelay(Node node, SafeCommandStore safeStore, TxnId txnId, int retryCount, ProgressLog.BlockedUntil retrying, TimeUnit units) { return 0; }
         @Override public long retrySyncPointDelay(Node node, int attempt, TimeUnit units) { return 0; }
+        @Override public long retryTopologyDelay(Node node, int attempt, TimeUnit units) { return 0; }
         @Override public long retryDurabilityDelay(Node node, int attempt, TimeUnit units) { return 0; }
         @Override public long expireEpochWait(TimeUnit units) { return 0; }
         @Override public long expiresAt(ReplyContext replyContext, TimeUnit unit) { return 0; }
@@ -709,6 +714,7 @@ public class CommandsForKeySerializerTest
             @Override public TopologyManager topology() { return null; }
             @Override public long currentStamp() { return 0; }
             @Override public void updateStamp() { throw new UnsupportedOperationException(); }
+            @Override public boolean isReplaying() { return false; }
             @Override public long now() { return 0; }
             @Override public long elapsed(TimeUnit unit) { return 0; }
         }; }

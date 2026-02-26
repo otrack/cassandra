@@ -32,13 +32,10 @@ import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.function.UnaryOperator;
 import java.util.stream.Stream;
+
 import javax.annotation.Nullable;
 import javax.management.MalformedObjectNameException;
 import javax.management.ObjectName;
-
-import com.google.common.annotations.VisibleForTesting;
-import com.google.common.collect.ImmutableList;
-import com.google.common.collect.ImmutableSet;
 
 import com.codahale.metrics.Counter;
 import com.codahale.metrics.Gauge;
@@ -48,7 +45,10 @@ import com.codahale.metrics.Metered;
 import com.codahale.metrics.Metric;
 import com.codahale.metrics.MetricRegistry;
 import com.codahale.metrics.MetricSet;
-import com.codahale.metrics.Timer;
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableSet;
+
 import org.apache.cassandra.db.virtual.CollectionVirtualTableAdapter;
 import org.apache.cassandra.db.virtual.VirtualTable;
 import org.apache.cassandra.db.virtual.model.CounterMetricRow;
@@ -118,6 +118,7 @@ public class CassandraMetricsRegistry extends MetricRegistry
                                    .add(AccordCoordinatorMetrics.ACCORD_COORDINATOR)
                                    .add(AccordCacheMetrics.ACCORD_CACHE)
                                    .add(AccordReplicaMetrics.ACCORD_REPLICA)
+                                   .add(AccordExecutorMetrics.ACCORD_EXECUTOR)
                                    .add(AccordSystemMetrics.ACCORD_SYSTEM)
                                    .add(BatchMetrics.TYPE_NAME)
                                    .add(BufferPoolMetrics.TYPE_NAME)
@@ -172,12 +173,12 @@ public class CassandraMetricsRegistry extends MetricRegistry
             return Long.toString(((Counter) metric).getCount());
         else if (metric instanceof Gauge)
             return getGaugeValue((Gauge) metric);
-        else if (metric instanceof CassandraHistogram)
-            return Double.toString(((CassandraHistogram) metric).getSnapshot().getMedian());
+        else if (metric instanceof OverrideHistogram)
+            return Double.toString(((OverrideHistogram) metric).getSnapshot().getMedian());
         else if (metric instanceof Meter)
             return Long.toString(((Meter) metric).getCount());
-        else if (metric instanceof Timer)
-            return Long.toString(((Timer) metric).getCount());
+        else if (metric instanceof com.codahale.metrics.Timer)
+            return Long.toString(((com.codahale.metrics.Timer) metric).getCount());
         else
             throw new IllegalStateException("Unknown metric type: " + metric.getClass().getName());
     }
@@ -248,7 +249,7 @@ public class CassandraMetricsRegistry extends MetricRegistry
                                                          "All metrics with type \"Histogram\"",
                                                          new HistogramMetricRowWalker(),
                                                          Metrics.getMetrics(),
-                                                         CassandraHistogram.class::isInstance,
+                                                         OverrideHistogram.class::isInstance,
                                                          HistogramMetricRow::new))
                .add(createSinglePartitionedValueFiltered(VIRTUAL_METRICS,
                                                          "type_meter",
@@ -302,7 +303,26 @@ public class CassandraMetricsRegistry extends MetricRegistry
 
     public Counter counter(MetricName... name)
     {
-        Counter counter = super.counter(name[0].getMetricName());
+        String simpleMetricName = name[0].getMetricName();
+        Metric metric = super.getMetrics().get(simpleMetricName);
+        if (metric instanceof Counter)
+            return (Counter) metric;
+
+        Counter counter = new ThreadLocalCounter();
+        super.register(simpleMetricName, counter);
+        Stream.of(name).forEach(n -> register(n, counter));
+        return counter;
+    }
+
+    public Counter atomicLongCounter(MetricName... name)
+    {
+        String simpleMetricName = name[0].getMetricName();
+        Metric metric = super.getMetrics().get(simpleMetricName);
+        if (metric instanceof Counter)
+            return (Counter) metric;
+
+        Counter counter = new AtomicLongCounter();
+        super.register(simpleMetricName, counter);
         Stream.of(name).forEach(n -> register(n, counter));
         return counter;
     }
@@ -314,31 +334,37 @@ public class CassandraMetricsRegistry extends MetricRegistry
 
     public Meter meter(boolean gaugeCompatible, MetricName... name)
     {
-        Meter meter = super.meter(name[0].getMetricName());
+        String simpleMetricName = name[0].getMetricName();
+        Metric metric = super.getMetrics().get(simpleMetricName);
+        if (metric instanceof Meter)
+            return (Meter) metric;
+
+        Meter meter = new ThreadLocalMeter();
+        super.register(simpleMetricName, meter);
         Stream.of(name).forEach(n -> register(gaugeCompatible, n, meter));
         return meter;
     }
 
-    public CassandraHistogram histogram(MetricName name, boolean considerZeroes)
+    public OverrideHistogram histogram(MetricName name, boolean considerZeroes)
     {
         return register(name, new ClearableHistogram(new DecayingEstimatedHistogramReservoir(considerZeroes)));
     }
 
-    public CassandraHistogram histogram(MetricName name, MetricName alias, boolean considerZeroes)
+    public OverrideHistogram histogram(MetricName name, MetricName alias, boolean considerZeroes)
     {
-        CassandraHistogram histogram = histogram(name, considerZeroes);
+        OverrideHistogram histogram = histogram(name, considerZeroes);
         register(alias, histogram);
         return histogram;
     }
 
-    public ShardedHistogram shardedHistogram(MetricName name)
+    public ShardedHistogram shardedHistogram(MetricName name, boolean isCumulative)
     {
-        return register(name, new ShardedHistogram());
+        return register(name, new ShardedHistogram(isCumulative));
     }
 
-    public OnDemandHistogram onDemandHistogram(MetricName name, Supplier<LogLinearHistogram.LogLinearSnapshot> snapshot)
+    public OnDemandHistogram onDemandHistogram(MetricName name, Supplier<LogLinearHistogram.LogLinearSnapshot> snapshot, boolean isCumulative)
     {
-        return register(name, new OnDemandHistogram(snapshot));
+        return register(name, new OnDemandHistogram(snapshot, isCumulative));
     }
 
     public <T extends Gauge<?>> T gauge(MetricName name, T gauge)
@@ -353,7 +379,7 @@ public class CassandraMetricsRegistry extends MetricRegistry
         return gaugeLoc;
     }
 
-    public Timer timer(MetricName name)
+    public SnapshottingTimer timer(MetricName name)
     {
         return timer(name, DEFAULT_TIMER_UNIT);
     }
@@ -531,8 +557,8 @@ public class CassandraMetricsRegistry extends MetricRegistry
             mbean = new JmxGauge((Gauge<?>) metric, name);
         else if (metric instanceof Counter)
             mbean = new JmxCounter((Counter) metric, name);
-        else if (metric instanceof CassandraHistogram)
-            mbean = new JmxHistogram((CassandraHistogram) metric, name);
+        else if (metric instanceof OverrideHistogram)
+            mbean = new JmxHistogram((OverrideHistogram) metric, name);
         else if (metric instanceof Histogram)
             throw new UnsupportedOperationException("Must supply a CassandraHistogram");
         else if (metric instanceof Timer)
@@ -662,10 +688,10 @@ public class CassandraMetricsRegistry extends MetricRegistry
 
     private static class JmxHistogram extends AbstractBean implements JmxHistogramMBean
     {
-        final CassandraHistogram metric;
+        final OverrideHistogram metric;
         private long[] last = null;
 
-        private JmxHistogram(CassandraHistogram metric, ObjectName objectName)
+        private JmxHistogram(OverrideHistogram metric, ObjectName objectName)
         {
             super(objectName);
             this.metric = metric;
@@ -747,17 +773,22 @@ public class CassandraMetricsRegistry extends MetricRegistry
         }
 
         /**
-         * Returns a histogram describing the values recorded since the last time this method was called.
+         * If the Histogram has cumulative data, returns a histogram describing the values recorded since the last time this method was called.
          *
-         * ex. If the counts are [0, 1, 2, 1] at the time the first caller arrives, but change to [1, 2, 3, 2] by the 
+         * ex. If the counts are [0, 1, 2, 1] at the time the first caller arrives, but change to [1, 2, 3, 2] by the
          * time a second caller arrives, the second caller will receive [1, 1, 1, 1].
+         *
+         * If the Histogram does not have cumulative data, simply returns the current snapshot.
          *
          * @return a histogram whose bucket offsets are assumed to be in nanoseconds
          */
         @Override
         public synchronized long[] getRecentValues()
         {
-            long[] now = metric.getSnapshot().getValues();
+            long[] now = values();
+            if (!metric.isCumulative())
+                return now;
+
             long[] delta = delta(now, last);
             last = now;
             return delta;
@@ -942,6 +973,12 @@ public class CassandraMetricsRegistry extends MetricRegistry
         long[] getRecentValues();
 
         String getDurationUnit();
+
+        String bucketsId();
+
+        long[] rawBuckets(int count);
+
+        long[] rawValues();
     }
 
     static class JmxTimer extends JmxMeter implements JmxTimerMBean
@@ -1023,7 +1060,10 @@ public class CassandraMetricsRegistry extends MetricRegistry
         @Override
         public long[] values()
         {
-            return metric.getSnapshot().getValues();
+            long[] values = metric.getSnapshot().getValues();
+            if (metric.bucketStrategy() == CassandraReservoir.BucketStrategy.log_linear)
+                values = metric.bucketStrategy().translateTo(CassandraReservoir.BucketStrategy.exp_12_nozero, values);
+            return values;
         }
 
         /**
@@ -1037,7 +1077,10 @@ public class CassandraMetricsRegistry extends MetricRegistry
         @Override
         public synchronized long[] getRecentValues()
         {
-            long[] now = metric.getSnapshot().getValues();
+            long[] now = values();
+            if (!metric.isCumulative())
+                return now;
+
             long[] delta = delta(now, last);
             last = now;
             return delta;
@@ -1047,6 +1090,24 @@ public class CassandraMetricsRegistry extends MetricRegistry
         public String getDurationUnit()
         {
             return durationUnit;
+        }
+
+        @Override
+        public String bucketsId()
+        {
+            return metric.bucketStrategy().name();
+        }
+
+        @Override
+        public long[] rawBuckets(int count)
+        {
+            return metric.bucketStarts(count);
+        }
+
+        @Override
+        public long[] rawValues()
+        {
+            return metric.getSnapshot().getValues();
         }
     }
 

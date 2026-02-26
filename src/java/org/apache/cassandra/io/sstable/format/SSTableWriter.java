@@ -29,14 +29,18 @@ import java.util.Set;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 
+import javax.annotation.Nullable;
+
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Sets;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.SerializationHeader;
+import org.apache.cassandra.db.compression.CompressionDictionaryManager;
 import org.apache.cassandra.db.lifecycle.ILifecycleTransaction;
 import org.apache.cassandra.db.rows.UnfilteredRowIterator;
 import org.apache.cassandra.dht.AbstractBounds;
@@ -75,8 +79,8 @@ public abstract class SSTableWriter extends SSTable implements Transactional
     protected boolean isTransient;
     protected long maxDataAge = -1;
     protected final long keyCount;
-    protected final MetadataCollector metadataCollector;
-    protected final SerializationHeader header;
+    public final MetadataCollector metadataCollector;
+    public final SerializationHeader header;
     protected final List<SSTableFlushObserver> observers;
     protected final MmappedRegionsCache mmappedRegionsCache;
     protected final TransactionalProxy txnProxy = txnProxy();
@@ -211,6 +215,11 @@ public abstract class SSTableWriter extends SSTable implements Transactional
         return getOnDiskFilePointer();
     }
 
+    public long getTotalRows()
+    {
+        return metadataCollector.getTotalRows();
+    }
+
     /**
      * Reset the data file to the marked position (see {@link #mark()}) and truncate the rest of the file.
      */
@@ -282,6 +291,12 @@ public abstract class SSTableWriter extends SSTable implements Transactional
         txnProxy.prepareToCommit();
     }
 
+    // notify sstable flush observer about sstable writer switched
+    public final void onSSTableWriterSwitched()
+    {
+        observers.forEach(SSTableFlushObserver::onSSTableWriterSwitched);
+    }
+
     public final Throwable commit(Throwable accumulate)
     {
         try
@@ -326,7 +341,7 @@ public abstract class SSTableWriter extends SSTable implements Transactional
         }
     }
 
-    protected Map<MetadataType, MetadataComponent> finalizeMetadata()
+    protected final Map<MetadataType, MetadataComponent> finalizeMetadata()
     {
         return metadataCollector.finalizeMetadata(getPartitioner().getClass().getCanonicalName(),
                                                   metadata().params.bloomFilterFpChance,
@@ -437,6 +452,8 @@ public abstract class SSTableWriter extends SSTable implements Transactional
         private boolean transientSSTable;
         private SerializationHeader serializationHeader;
         private List<Index.Group> indexGroups;
+        @Nullable
+        private CompressionDictionaryManager compressionDictionaryManager;
 
         public B setMetadataCollector(MetadataCollector metadataCollector)
         {
@@ -515,6 +532,18 @@ public abstract class SSTableWriter extends SSTable implements Transactional
             return (B) this;
         }
 
+        public B setCompressionDictionaryManager(CompressionDictionaryManager compressionDictionaryManager)
+        {
+            this.compressionDictionaryManager = compressionDictionaryManager;
+            return (B) this;
+        }
+
+        @Nullable
+        public CompressionDictionaryManager getCompressionDictionaryManager()
+        {
+            return compressionDictionaryManager;
+        }
+
         public MetadataCollector getMetadataCollector()
         {
             return metadataCollector;
@@ -572,5 +601,13 @@ public abstract class SSTableWriter extends SSTable implements Transactional
         {
             return new SSTableZeroCopyWriter(this, txn, owner);
         }
+    }
+
+    public void setFirst(DecoratedKey key) {
+        first = key;
+    }
+
+    public void setLast(DecoratedKey key) {
+        last = key;
     }
 }

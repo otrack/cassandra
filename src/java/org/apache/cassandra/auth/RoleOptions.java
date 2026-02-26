@@ -21,11 +21,12 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
 
+import org.mindrot.jbcrypt.BCrypt;
+
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.exceptions.InvalidRequestException;
 import org.apache.cassandra.exceptions.SyntaxException;
 import org.apache.cassandra.utils.FBUtilities;
-import org.mindrot.jbcrypt.BCrypt;
 
 public class RoleOptions
 {
@@ -92,6 +93,11 @@ public class RoleOptions
     public boolean isGeneratedPassword()
     {
         return (Boolean) options.getOrDefault(IRoleManager.Option.GENERATED_PASSWORD, Boolean.FALSE);
+    }
+
+    public boolean isGeneratedName()
+    {
+        return (Boolean) options.getOrDefault(IRoleManager.Option.GENERATED_NAME, Boolean.FALSE);
     }
 
     /**

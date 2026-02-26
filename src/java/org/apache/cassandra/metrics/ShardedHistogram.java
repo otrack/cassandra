@@ -23,6 +23,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.Lock;
 
 import com.codahale.metrics.Snapshot;
+
 import org.apache.cassandra.metrics.LogLinearHistogram.LogLinearSnapshot;
 import org.apache.cassandra.utils.Clock;
 
@@ -43,19 +44,6 @@ public class ShardedHistogram extends OverrideHistogram
             this.histogram = histogram;
         }
 
-        long total()
-        {
-            lock.lock();
-            try
-            {
-                return histogram.totalCount;
-            }
-            finally
-            {
-                lock.unlock();
-            }
-        }
-
         public void updateSnapshot(LogLinearSnapshot snapshot)
         {
             lock.lock();
@@ -71,11 +59,12 @@ public class ShardedHistogram extends OverrideHistogram
     }
 
     final CopyOnWriteArrayList<HistogramShard> shards = new CopyOnWriteArrayList<>();
+    final boolean isCumulative;
     final long initialMaxValue;
 
-    public ShardedHistogram()
+    public ShardedHistogram(boolean isCumulative)
     {
-        this(1 << 16);
+        this(isCumulative, 1 << 16);
     }
 
     @Override
@@ -90,8 +79,9 @@ public class ShardedHistogram extends OverrideHistogram
         return LogLinearHistogram.bucketsWithLength(length);
     }
 
-    public ShardedHistogram(long initialMaxValue)
+    public ShardedHistogram(boolean isCumulative, long initialMaxValue)
     {
+        this.isCumulative = isCumulative;
         this.initialMaxValue = initialMaxValue;
     }
 
@@ -142,5 +132,11 @@ public class ShardedHistogram extends OverrideHistogram
     public Snapshot getSnapshot()
     {
         return maybeRefresh();
+    }
+
+    @Override
+    public boolean isCumulative()
+    {
+        return isCumulative;
     }
 }

@@ -19,7 +19,13 @@
 package org.apache.cassandra.metrics;
 
 import java.lang.reflect.Field;
+
 import javax.annotation.Nullable;
+
+import com.codahale.metrics.Counting;
+import com.codahale.metrics.Histogram;
+import com.codahale.metrics.Meter;
+import com.codahale.metrics.Timer;
 
 import accord.api.CoordinatorEventListener;
 import accord.api.Result;
@@ -28,10 +34,7 @@ import accord.local.Node;
 import accord.primitives.Ballot;
 import accord.primitives.Deps;
 import accord.primitives.TxnId;
-import com.codahale.metrics.Counting;
-import com.codahale.metrics.Histogram;
-import com.codahale.metrics.Meter;
-import com.codahale.metrics.Timer;
+
 import org.apache.cassandra.service.accord.api.AccordTimeService;
 import org.apache.cassandra.tracing.Tracing;
 
@@ -42,6 +45,7 @@ public class AccordCoordinatorMetrics
 {
     public final static AccordCoordinatorMetrics readMetrics = new AccordCoordinatorMetrics("ro");
     public final static AccordCoordinatorMetrics writeMetrics = new AccordCoordinatorMetrics("rw");
+    public final static AccordCoordinatorMetrics syncPointMetrics = new AccordCoordinatorMetrics("rx");
 
     public static final String ACCORD_COORDINATOR = "AccordCoordinator";
     public static final String COORDINATOR_EPOCHS = "Epochs";
@@ -51,6 +55,7 @@ public class AccordCoordinatorMetrics
     public static final String COORDINATOR_PREACCEPT_LATENCY = "PreAcceptLatency";
     public static final String COORDINATOR_EXECUTE_LATENCY = "ExecuteLatency";
     public static final String COORDINATOR_APPLY_LATENCY = "ApplyLatency";
+    public static final String EPHEMERAL = "Ephemeral";
     public static final String FAST_PATHS = "FastPaths";
     public static final String MEDIUM_PATHS = "MediumPaths";
     public static final String SLOW_PATHS = "SlowPaths";
@@ -96,6 +101,11 @@ public class AccordCoordinatorMetrics
      * The number of tables involved in a transaction
      */
     public final Histogram tables;
+
+    /**
+     * The number of ephemeral transactions executed on this coordinator.
+     */
+    public final Meter ephemeral;
 
     /**
      * The number of fast path transactions executed on this coordinator.
@@ -158,6 +168,7 @@ public class AccordCoordinatorMetrics
         keys = Metrics.histogram(coordinator.createMetricName(COORDINATOR_KEYS), true);
         tables = Metrics.histogram(coordinator.createMetricName(COORDINATOR_TABLES), true);
 
+        ephemeral = Metrics.meter(coordinator.createMetricName(EPHEMERAL));
         fastPaths = Metrics.meter(coordinator.createMetricName(FAST_PATHS));
         mediumPaths = Metrics.meter(coordinator.createMetricName(MEDIUM_PATHS));
         slowPaths = Metrics.meter(coordinator.createMetricName(SLOW_PATHS));
@@ -167,7 +178,7 @@ public class AccordCoordinatorMetrics
         invalidations = Metrics.meter(coordinator.createMetricName(INVALIDATIONS));
         recoveryDelay = Metrics.timer(coordinator.createMetricName(RECOVERY_DELAY));
         recoveryDuration = Metrics.timer(coordinator.createMetricName(RECOVERY_TIME));
-        fastPathToTotal = new RatioGaugeSet(fastPaths, RatioGaugeSet.sum(fastPaths, mediumPaths, slowPaths), coordinator, FAST_PATH_TO_TOTAL + ".%s");
+        fastPathToTotal = new RatioGaugeSet(fastPaths, RatioGaugeSet.sum(ephemeral, fastPaths, mediumPaths, slowPaths), coordinator, FAST_PATH_TO_TOTAL + ".%s");
     }
 
     @Override
@@ -192,14 +203,12 @@ public class AccordCoordinatorMetrics
         {
             throw new RuntimeException(e);
         }
-        builder.append("]");
+        builder.append(']');
         return builder.toString();
     }
 
     public static class Listener implements CoordinatorEventListener
     {
-        public static final Listener instance = new Listener();
-
         private AccordCoordinatorMetrics forTransaction(TxnId txnId)
         {
             if (txnId != null)
@@ -208,6 +217,8 @@ public class AccordCoordinatorMetrics
                     return writeMetrics;
                 else if (txnId.isSomeRead())
                     return readMetrics;
+                else if (txnId.isSyncPoint())
+                    return syncPointMetrics;
             }
             return null;
         }
@@ -237,6 +248,7 @@ public class AccordCoordinatorMetrics
                 {
                     switch (path)
                     {
+                        case EPHEMERAL: metrics.ephemeral.mark(); break;
                         case FAST: metrics.fastPaths.mark(); break;
                         case MEDIUM: metrics.mediumPaths.mark(); break;
                         case SLOW: metrics.slowPaths.mark(); break;

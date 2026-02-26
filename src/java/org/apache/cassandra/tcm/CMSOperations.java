@@ -40,10 +40,10 @@ import org.apache.cassandra.tcm.membership.NodeState;
 import org.apache.cassandra.tcm.membership.NodeVersion;
 import org.apache.cassandra.tcm.migration.Election;
 import org.apache.cassandra.tcm.sequences.CancelCMSReconfiguration;
+import org.apache.cassandra.tcm.sequences.DropAccordTable;
 import org.apache.cassandra.tcm.sequences.InProgressSequences;
 import org.apache.cassandra.tcm.sequences.ReconfigureCMS;
 import org.apache.cassandra.tcm.serialization.Version;
-import org.apache.cassandra.tcm.sequences.DropAccordTable;
 import org.apache.cassandra.tcm.transformations.Unregister;
 import org.apache.cassandra.tcm.transformations.cms.AdvanceCMSReconfiguration;
 import org.apache.cassandra.utils.FBUtilities;
@@ -63,6 +63,7 @@ public class CMSOperations implements CMSOperationsMBean
     public static final String LOCAL_PENDING = "LOCAL_PENDING";
     public static final String COMMITS_PAUSED = "COMMITS_PAUSED";
     public static final String REPLICATION_FACTOR = "REPLICATION_FACTOR";
+    public static final String CMS_ID = "CMS_ID";
 
     private static final Logger logger = LoggerFactory.getLogger(ClusterMetadataService.class);
     public static CMSOperations instance = new CMSOperations(ClusterMetadataService.instance());
@@ -161,6 +162,7 @@ public class CMSOperations implements CMSOperationsMBean
         info.put(LOCAL_PENDING, Integer.toString(cms.log().pendingBufferSize()));
         info.put(COMMITS_PAUSED, Boolean.toString(cms.commitsPaused()));
         info.put(REPLICATION_FACTOR, ReplicationParams.meta(metadata).toString());
+        info.put(CMS_ID, Integer.toString(metadata.metadataIdentifier));
         return info;
     }
 

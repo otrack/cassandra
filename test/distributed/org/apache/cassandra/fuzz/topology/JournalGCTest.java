@@ -26,6 +26,7 @@ import org.junit.Assert;
 import org.junit.Test;
 
 import accord.primitives.TxnId;
+
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.distributed.Cluster;
 import org.apache.cassandra.distributed.api.ConsistencyLevel;
@@ -113,7 +114,7 @@ public class JournalGCTest extends FuzzTestBase
                     ((AccordService) AccordService.instance()).journal().forEach((v) -> {
                         if (v.type == JournalKey.Type.COMMAND_DIFF && (a.get() == null || v.id.compareTo(a.get()) > 0))
                             a.set(v.id);
-                    });
+                    }, false);
                     return a.get() == null ? "" : a.get().toString();
                 });
 
@@ -123,7 +124,7 @@ public class JournalGCTest extends FuzzTestBase
                     ((AccordService) AccordService.instance()).journal().forEach((v) -> {
                         if (v.type == JournalKey.Type.COMMAND_DIFF && v.id.compareTo(maxId) <= 0)
                             a.incrementAndGet();
-                    });
+                    }, false);
                     return a.get();
                 }, maximumId);
 

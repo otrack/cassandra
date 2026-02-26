@@ -43,6 +43,7 @@ import accord.utils.Gen;
 import accord.utils.RandomSource;
 import accord.utils.RandomTestRunner;
 import accord.utils.UnhandledEnum;
+
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.dht.IPartitioner;
 import org.apache.cassandra.dht.Murmur3Partitioner;
@@ -181,7 +182,7 @@ public class KeySerializersTest
         int count = superset.isEmpty() ? 0 : rs.nextInt(superset.size());
         Participants<?> subset = selectSubset(rs, count, superset);
         if (superset instanceof Route<?> && (!changeType || rs.nextBoolean()))
-            return superset.intersecting(subset);
+            return superset.overlapping(subset);
         return subset;
     }
 

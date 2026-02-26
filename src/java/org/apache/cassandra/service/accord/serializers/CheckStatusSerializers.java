@@ -42,6 +42,7 @@ import accord.primitives.Status.Durability;
 import accord.primitives.Timestamp;
 import accord.primitives.TxnId;
 import accord.primitives.Writes;
+
 import org.apache.cassandra.db.TypeSizes;
 import org.apache.cassandra.io.UnversionedSerializer;
 import org.apache.cassandra.io.util.DataInputPlus;
@@ -128,8 +129,8 @@ public class CheckStatusSerializers
         public void serialize(CheckStatus check, DataOutputPlus out) throws IOException
         {
             CommandSerializers.txnId.serialize(check.txnId, out);
-            KeySerializers.participants.serialize(check.query, out);
-            out.writeUnsignedVInt(check.sourceEpoch);
+            KeySerializers.participants.serialize(check.scope, out);
+            out.writeUnsignedVInt(check.waitForEpoch);
             out.writeByte(check.includeInfo.ordinal());
             CommandSerializers.ballot.serialize(check.bumpBallot, out);
         }
@@ -149,8 +150,8 @@ public class CheckStatusSerializers
         public long serializedSize(CheckStatus check)
         {
             return CommandSerializers.txnId.serializedSize(check.txnId)
-                   + KeySerializers.participants.serializedSize(check.query)
-                   + TypeSizes.sizeofUnsignedVInt(check.sourceEpoch)
+                   + KeySerializers.participants.serializedSize(check.scope)
+                   + TypeSizes.sizeofUnsignedVInt(check.waitForEpoch)
                    + TypeSizes.BYTE_SIZE
                    + CommandSerializers.ballot.serializedSize(check.bumpBallot);
         }

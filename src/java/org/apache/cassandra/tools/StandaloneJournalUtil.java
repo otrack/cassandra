@@ -18,10 +18,6 @@
 
 package org.apache.cassandra.tools;
 
-import accord.local.RedundantBefore;
-import accord.primitives.Timestamp;
-import accord.primitives.TxnId;
-
 import java.io.IOException;
 import java.nio.file.FileSystems;
 import java.nio.file.Files;
@@ -34,7 +30,11 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import accord.local.RedundantBefore;
+import accord.primitives.Timestamp;
+import accord.primitives.TxnId;
 import accord.utils.Invariants;
+
 import org.apache.cassandra.config.AccordSpec;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.config.DurationSpec;
@@ -274,7 +274,7 @@ public class StandaloneJournalUtil implements Runnable
 
             Map<Integer, RedundantBefore> cache = new HashMap<>();
             journal.start(null);
-            journal.forEach(key -> processKey(cache, journal, key, txnId, sinceTimestamp, untilTimestamp, skipAllErrors, skipExceptionTypes));
+            journal.forEach(key -> processKey(cache, journal, key, txnId, sinceTimestamp, untilTimestamp, skipAllErrors, skipExceptionTypes), false);
         }
 
         private void processKey(Map<Integer, RedundantBefore> redundantBeforeCache, AccordJournal journal, JournalKey key, Timestamp txnId, Timestamp minTimestamp, Timestamp maxTimestamp, boolean skipAllErrors, Set<String> skipExceptionTypes)

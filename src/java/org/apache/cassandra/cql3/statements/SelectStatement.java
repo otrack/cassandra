@@ -32,6 +32,7 @@ import java.util.Set;
 import java.util.TreeMap;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
+
 import javax.annotation.concurrent.ThreadSafe;
 
 import com.google.common.annotations.VisibleForTesting;
@@ -40,6 +41,7 @@ import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Iterables;
+
 import org.apache.commons.lang3.builder.ToStringBuilder;
 import org.apache.commons.lang3.builder.ToStringStyle;
 import org.slf4j.Logger;
@@ -1474,7 +1476,7 @@ public class SelectStatement implements CQLStatement.SingleKeyspaceCqlStatement,
                                              boundNames,
                                              orderings,
                                              selectsOnlyStaticColumns,
-                                             parameters.allowFiltering || !requiresAllowFilteringIfNotSpecified(metadata),
+                                             parameters.allowFiltering || !requiresAllowFilteringIfNotSpecified(metadata, true),
                                              forView);
         }
 
@@ -1700,7 +1702,7 @@ public class SelectStatement implements CQLStatement.SingleKeyspaceCqlStatement,
             {
                 // We will potentially filter data if the row filter is not the identity and there isn't any index group
                 // supporting all the expressions in the filter.
-                if (requiresAllowFilteringIfNotSpecified(table))
+                if (requiresAllowFilteringIfNotSpecified(table, true))
                     checkFalse(restrictions.needFiltering(table), StatementRestrictions.REQUIRES_ALLOW_FILTERING_MESSAGE);
             }
         }

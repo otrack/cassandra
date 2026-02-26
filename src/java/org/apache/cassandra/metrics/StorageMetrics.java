@@ -23,6 +23,7 @@ import java.util.stream.StreamSupport;
 import com.codahale.metrics.Counter;
 import com.codahale.metrics.Gauge;
 import com.codahale.metrics.Meter;
+
 import org.apache.cassandra.db.Keyspace;
 
 import static org.apache.cassandra.metrics.CassandraMetricsRegistry.Metrics;
@@ -44,7 +45,8 @@ public class StorageMetrics
         createSummingGauge("UnreplicatedUncompressedLoad", metric -> metric.unreplicatedUncompressedLiveDiskSpaceUsed.getValue());
 
     public static final Counter uncaughtExceptions = Metrics.counter(factory.createMetricName("Exceptions"));
-    public static final Counter totalHintsInProgress  = Metrics.counter(factory.createMetricName("TotalHintsInProgress"));
+    // NOTE: we read totalHintsInProgress counter value as a part of write hot path, so an alternative implementation is used here
+    public static final Counter totalHintsInProgress  = Metrics.atomicLongCounter(factory.createMetricName("TotalHintsInProgress"));
     public static final Counter totalHints = Metrics.counter(factory.createMetricName("TotalHints"));
     public static final Counter repairExceptions = Metrics.counter(factory.createMetricName("RepairExceptions"));
     public static final Counter totalOpsForInvalidToken = Metrics.counter(factory.createMetricName("TotalOpsForInvalidToken"));

@@ -26,28 +26,29 @@ import org.junit.Test;
 
 import accord.api.Key;
 import accord.api.RoutingKey;
-import accord.local.StoreParticipants;
-import accord.local.cfk.CommandsForKey;
 import accord.local.Command;
 import accord.local.LoadKeys;
 import accord.local.Node;
 import accord.local.PreLoadContext;
 import accord.local.SafeCommand;
 import accord.local.SafeCommandStore;
-import accord.primitives.KeyDeps;
-import accord.primitives.Status;
+import accord.local.StoreParticipants;
+import accord.local.cfk.CommandsForKey;
 import accord.messages.Accept;
 import accord.messages.Commit;
 import accord.messages.PreAccept;
 import accord.primitives.Ballot;
 import accord.primitives.FullRoute;
+import accord.primitives.KeyDeps;
 import accord.primitives.Keys;
 import accord.primitives.PartialDeps;
 import accord.primitives.PartialTxn;
 import accord.primitives.Route;
+import accord.primitives.Status;
 import accord.primitives.Timestamp;
 import accord.primitives.Txn;
 import accord.primitives.TxnId;
+
 import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.schema.KeyspaceParams;
 import org.apache.cassandra.schema.Schema;
@@ -69,7 +70,6 @@ import static org.apache.cassandra.service.accord.AccordTestUtils.txnId;
 
 public class AccordCommandTest
 {
-
     static final AtomicLong clock = new AtomicLong(0);
     private static final Node.Id ID1 = new Node.Id(1);
     private static final Node.Id ID2 = new Node.Id(2);
@@ -104,7 +104,7 @@ public class AccordCommandTest
         Key key = (Key)txn.keys().get(0);
         RoutingKey homeKey = key.toUnseekable();
         FullRoute<?> fullRoute = txn.keys().toRoute(homeKey);
-        Route<?> route = fullRoute.slice(fullRange(txn));
+        Route<?> route = fullRoute.overlapping(fullRange(txn));
         PartialTxn partialTxn = txn.intersecting(route, true);
         PreAccept preAccept = PreAccept.SerializerSupport.create(txnId, route, 1, 1, 1, partialTxn, null, false, fullRoute);
 
@@ -176,7 +176,7 @@ public class AccordCommandTest
             Command before = safeStore.ifInitialised(txnId).current();
             Assert.assertEquals(commit.executeAt, before.executeAt());
             Assert.assertTrue(before.hasBeen(Status.Committed));
-            Assert.assertEquals(commit.partialDeps, before.partialDeps());
+            Assert.assertEquals(commit.partialDeps(), before.partialDeps());
 
             CommandsForKey cfk = safeStore.get(key(1).toUnseekable()).current();
             Assert.assertTrue(cfk.indexOf(txnId) >= 0);
@@ -196,7 +196,7 @@ public class AccordCommandTest
         Key key = (Key)txn.keys().get(0);
         RoutingKey homeKey = key.toUnseekable();
         FullRoute<?> fullRoute = txn.keys().toRoute(homeKey);
-        Route<?> route = fullRoute.slice(fullRange(txn));
+        Route<?> route = fullRoute.overlapping(fullRange(txn));
         PartialTxn partialTxn = txn.intersecting(route, true);
         PreAccept preAccept1 = PreAccept.SerializerSupport.create(txnId1, route, 1, 1, 1, partialTxn, null, false, fullRoute);
 

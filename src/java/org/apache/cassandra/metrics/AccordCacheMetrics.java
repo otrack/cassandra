@@ -23,6 +23,7 @@ import java.util.function.Function;
 import java.util.function.ToLongFunction;
 
 import com.codahale.metrics.Gauge;
+
 import org.apache.cassandra.service.accord.AccordExecutor;
 import org.apache.cassandra.service.accord.IAccordService;
 
@@ -44,7 +45,7 @@ public class AccordCacheMetrics
 
         public AccordCacheGlobalMetrics()
         {
-            DefaultNameFactory factory = new DefaultNameFactory("AccordCache");
+            DefaultNameFactory factory = new DefaultNameFactory(ACCORD_CACHE);
             this.usedBytes = Metrics.gauge(factory.createMetricName("UsedBytes"), fromAccordService(sumExecutors(executor -> executor.cacheUnsafe().weightedSize()), 0L));
             this.unreferencedBytes = Metrics.gauge(factory.createMetricName("UnreferencedBytes"), fromAccordService(sumExecutors(executor -> executor.cacheUnsafe().unreferencedBytes()), 0L));
         }
@@ -89,18 +90,18 @@ public class AccordCacheMetrics
 
     public AccordCacheMetrics(String subTypeName)
     {
-        DefaultNameFactory factory = new DefaultNameFactory("AccordCache", subTypeName);
-        this.objectSize = Metrics.shardedHistogram(factory.createMetricName("EntrySize"));
+        DefaultNameFactory factory = new DefaultNameFactory(ACCORD_CACHE, subTypeName);
+        this.objectSize = Metrics.shardedHistogram(factory.createMetricName("EntrySize"), false);
         this.hits = Metrics.gauge(factory.createMetricName("Hits"), hitRate::totalHits);
         this.misses = Metrics.gauge(factory.createMetricName("Misses"), hitRate::totalMisses);
         this.requests = Metrics.gauge(factory.createMetricName("Requests"), hitRate::totalRequests);
-        this.requestRate1m = Metrics.gauge(factory.createMetricName("Requests"), () -> hitRate.requestsPerSecond(1));
-        this.requestRate5m = Metrics.gauge(factory.createMetricName("Requests"), () -> hitRate.requestsPerSecond(5));
+        this.requestRate1m = Metrics.gauge(factory.createMetricName(RatioGaugeSet.ONE_MINUTE + "RequestRate"), () -> hitRate.requestsPerSecond(1));
+        this.requestRate5m = Metrics.gauge(factory.createMetricName(RatioGaugeSet.FIVE_MINUTE + "RequestRate"), () -> hitRate.requestsPerSecond(5));
         this.requestRate15m = Metrics.gauge(factory.createMetricName(RatioGaugeSet.FIFTEEN_MINUTE + "RequestRate"), () -> hitRate.requestsPerSecond(15));
         this.hitRate1m = Metrics.gauge(factory.createMetricName(RatioGaugeSet.ONE_MINUTE + "HitRate"), () -> hitRate.hitRate(1));
         this.hitRate5m = Metrics.gauge(factory.createMetricName(RatioGaugeSet.FIVE_MINUTE + "HitRate"), () -> hitRate.hitRate(5));
         this.hitRate15m = Metrics.gauge(factory.createMetricName(RatioGaugeSet.FIFTEEN_MINUTE + "HitRate"), () -> hitRate.hitRate(15));
-        this.hitRateAllTime = Metrics.gauge(factory.createMetricName("Misses"), hitRate::hitRateAllTime);
+        this.hitRateAllTime = Metrics.gauge(factory.createMetricName("HitRate"), hitRate::hitRateAllTime);
         this.subTypeName = subTypeName;
     }
 

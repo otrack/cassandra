@@ -26,6 +26,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
 import com.google.common.annotations.VisibleForTesting;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -257,6 +258,7 @@ public class SkipListMemtable extends AbstractAllocatorMemtable
         Map<PartitionPosition, AtomicBTreePartition> toFlush = getPartitionsSubMap(from, true, to, false);
         long keysSize = 0;
         long keyCount = 0;
+        TableMetadata currentTableMetadata = metadata();
 
         boolean trackContention = logger.isTraceEnabled();
         if (trackContention)
@@ -289,6 +291,8 @@ public class SkipListMemtable extends AbstractAllocatorMemtable
 
         return new AbstractFlushablePartitionSet<AtomicBTreePartition>()
         {
+            private final TableMetadata tableMetadata = currentTableMetadata;
+
             @Override
             public Memtable memtable()
             {
@@ -323,6 +327,12 @@ public class SkipListMemtable extends AbstractAllocatorMemtable
             public long partitionKeysSize()
             {
                 return partitionKeysSize;
+            }
+
+            @Override
+            public TableMetadata metadata()
+            {
+                return tableMetadata;
             }
         };
     }

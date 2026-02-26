@@ -41,7 +41,7 @@ import accord.primitives.Txn;
 import accord.primitives.TxnId;
 import accord.primitives.Writes;
 import accord.topology.Topologies;
-import accord.topology.Topologies.SelectNodeOwnership;
+
 import org.apache.cassandra.db.ConsistencyLevel;
 import org.apache.cassandra.service.accord.AccordEndpointMapper;
 import org.apache.cassandra.service.accord.txn.AccordUpdate;
@@ -90,12 +90,12 @@ public class AccordInteropAdapter extends TxnAdapter
     }
 
     @Override
-    public void persist(Node node, SequentialAsyncExecutor executor, Topologies any, Route<?> require, Route<?> sendTo, SelectNodeOwnership selectSendTo, FullRoute<?> route, Ballot ballot, CoordinationFlags flags, TxnId txnId, Txn txn, Timestamp executeAt, Deps deps, Writes writes, Result result, boolean informDurableOnDone, BiConsumer<? super Result, Throwable> callback)
+    public void persist(Node node, SequentialAsyncExecutor executor, Topologies any, Route<?> require, Route<?> sendTo, FullRoute<?> route, Ballot ballot, CoordinationFlags flags, TxnId txnId, Txn txn, Timestamp executeAt, Deps deps, Writes writes, Result result, boolean informDurableOnDone, BiConsumer<? super Result, Throwable> callback)
     {
-        if (applyKind == Minimal && doInteropPersist(node, executor, any, require, sendTo, selectSendTo, ballot, txnId, txn, executeAt, deps, writes, result, route, informDurableOnDone, callback))
+        if (applyKind == Minimal && doInteropPersist(node, executor, any, require, sendTo, ballot, txnId, txn, executeAt, deps, writes, result, route, informDurableOnDone, callback))
             return;
 
-        super.persist(node, executor, any, require, sendTo, selectSendTo, route, ballot, flags, txnId, txn, executeAt, deps, writes, result, informDurableOnDone, callback);
+        super.persist(node, executor, any, require, sendTo, route, ballot, flags, txnId, txn, executeAt, deps, writes, result, informDurableOnDone, callback);
     }
 
     private boolean doInteropExecute(Node node, SequentialAsyncExecutor executor, FullRoute<?> route, Ballot ballot, TxnId txnId, Txn txn, Timestamp executeAt, Deps deps, BiConsumer<? super Result, Throwable> callback)
@@ -106,12 +106,22 @@ public class AccordInteropAdapter extends TxnAdapter
         if (updateKind != AccordUpdate.Kind.UNRECOVERABLE_REPAIR && (consistencyLevel == null || consistencyLevel == ConsistencyLevel.ONE || txn.read().keys().isEmpty()))
             return false;
 
-        new AccordInteropExecution(node, txnId, txn, updateKind, route, ballot, executeAt, deps, callback, executor, consistencyLevel, endpointMapper)
-            .start();
+        AccordInteropExecution execution;
+        try
+        {
+            execution = new AccordInteropExecution(node, txnId, txn, updateKind, route, ballot, executeAt, deps, callback, executor, consistencyLevel, endpointMapper);
+        }
+        catch (Throwable t)
+        {
+            callback.accept(null, t);
+            return true;
+        }
+
+        execution.start();
         return true;
     }
 
-    private boolean doInteropPersist(Node node, SequentialAsyncExecutor executor, Topologies any, Route<?> require, Route<?> sendTo, SelectNodeOwnership selectSendTo, Ballot ballot, TxnId txnId, Txn txn, Timestamp executeAt, Deps deps, Writes writes, Result result, FullRoute<?> fullRoute, boolean informDurableOnDone, BiConsumer<? super Result, Throwable> callback)
+    private boolean doInteropPersist(Node node, SequentialAsyncExecutor executor, Topologies any, Route<?> require, Route<?> sendTo, Ballot ballot, TxnId txnId, Txn txn, Timestamp executeAt, Deps deps, Writes writes, Result result, FullRoute<?> fullRoute, boolean informDurableOnDone, BiConsumer<? super Result, Throwable> callback)
     {
         Update update = txn.update();
         ConsistencyLevel consistencyLevel = update instanceof AccordUpdate ? ((AccordUpdate) update).cassandraCommitCL() : null;
@@ -119,9 +129,19 @@ public class AccordInteropAdapter extends TxnAdapter
         if (consistencyLevel == null || consistencyLevel == ConsistencyLevel.ANY || writes.isEmpty())
             return false;
 
-        Topologies all = execution(node, any, sendTo, selectSendTo, fullRoute, txnId, executeAt);
-        new AccordInteropPersist(node, executor, all, txnId, require, ballot, txn, executeAt, deps, writes, result, fullRoute, consistencyLevel, CoordinationFlags.none(), informDurableOnDone, Minimal, callback)
-            .start();
+        AccordInteropPersist persist;
+        try
+        {
+            Topologies all = execution(node, any, sendTo, fullRoute, txnId, executeAt);
+            persist = new AccordInteropPersist(node, executor, all, txnId, require, ballot, txn, executeAt, deps, writes, result, fullRoute, consistencyLevel, CoordinationFlags.none(), informDurableOnDone, Minimal, callback);
+        }
+        catch (Throwable t)
+        {
+            callback.accept(null, t);
+            return true;
+        }
+
+        persist.start();
         return true;
     }
 }

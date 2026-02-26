@@ -22,9 +22,11 @@ import java.util.Collection;
 import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
+
 import javax.annotation.concurrent.NotThreadSafe;
 
 import com.google.common.base.Stopwatch;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -160,6 +162,25 @@ public class StorageAttachedIndexWriter implements SSTableFlushObserver
         catch (Throwable t)
         {
             logger.error(indexDescriptor.logMessage("Failed to record a static row during an index build"), t);
+            abort(t, true);
+        }
+    }
+
+    @Override
+    public void onSSTableWriterSwitched()
+    {
+        if (aborted) return;
+
+        try
+        {
+            for (PerColumnIndexWriter w : perIndexWriters)
+            {
+                w.onSSTableWriterSwitched(stopwatch);
+            }
+        }
+        catch (Throwable t)
+        {
+            logger.error(indexDescriptor.logMessage("Failed to flush segment on sstable writer switched"), t);
             abort(t, true);
         }
     }

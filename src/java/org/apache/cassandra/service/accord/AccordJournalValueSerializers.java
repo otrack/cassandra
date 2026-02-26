@@ -28,6 +28,7 @@ import accord.local.RedundantBefore;
 import accord.primitives.Ranges;
 import accord.primitives.Timestamp;
 import accord.primitives.TxnId;
+
 import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.service.accord.journal.AccordTopologyUpdate;
@@ -36,9 +37,6 @@ import org.apache.cassandra.service.accord.serializers.Version;
 
 import static accord.local.CommandStores.RangesForEpoch;
 
-// TODO (required): test with large collection values, and perhaps split out some fields if they have a tendency to grow larger
-// TODO (required): alert on metadata size
-// TODO (required): versioning
 public class AccordJournalValueSerializers
 {
     public interface FlyweightImage

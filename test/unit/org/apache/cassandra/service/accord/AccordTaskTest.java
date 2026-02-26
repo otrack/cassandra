@@ -30,40 +30,43 @@ import java.util.concurrent.locks.LockSupport;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 
-import accord.local.StoreParticipants;
-import accord.primitives.Participants;
-import accord.primitives.Route;
-
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Maps;
 
+import org.assertj.core.api.Assertions;
+import org.awaitility.Awaitility;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
+import org.mockito.Mockito;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import accord.api.RoutingKey;
-import accord.local.cfk.SafeCommandsForKey;
 import accord.local.CheckedCommands;
 import accord.local.Command;
 import accord.local.PreLoadContext;
 import accord.local.SafeCommand;
 import accord.local.SafeCommandStore;
-import accord.primitives.SaveStatus;
+import accord.local.StoreParticipants;
+import accord.local.cfk.SafeCommandsForKey;
 import accord.primitives.Ballot;
 import accord.primitives.FullRoute;
 import accord.primitives.Keys;
 import accord.primitives.PartialDeps;
 import accord.primitives.PartialTxn;
+import accord.primitives.Participants;
 import accord.primitives.Ranges;
+import accord.primitives.Route;
+import accord.primitives.SaveStatus;
 import accord.primitives.Timestamp;
 import accord.primitives.Txn;
 import accord.primitives.TxnId;
 import accord.utils.Gen;
 import accord.utils.Gens;
 import accord.utils.RandomSource;
+
 import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.cql3.QueryProcessor;
 import org.apache.cassandra.db.ReadExecutionController;
@@ -76,14 +79,11 @@ import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.service.accord.AccordCommandStore.ExclusiveCaches;
 import org.apache.cassandra.service.accord.AccordExecutor.ExclusiveGlobalCaches;
 import org.apache.cassandra.service.accord.AccordKeyspace.CommandsForKeyAccessor;
-import org.apache.cassandra.service.accord.api.TokenKey;
 import org.apache.cassandra.service.accord.api.PartitionKey;
+import org.apache.cassandra.service.accord.api.TokenKey;
 import org.apache.cassandra.utils.AssertionUtils;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.concurrent.Condition;
-import org.assertj.core.api.Assertions;
-import org.awaitility.Awaitility;
-import org.mockito.Mockito;
 
 import static accord.local.LoadKeys.SYNC;
 import static accord.local.LoadKeysFor.READ_WRITE;
@@ -195,7 +195,7 @@ public class AccordTaskTest
         RoutingKey routingKey = partialTxn.keys().get(0).asKey().toUnseekable();
         FullRoute<?> route = partialTxn.keys().toRoute(routingKey);
         Ranges ranges = AccordTestUtils.fullRange(partialTxn.keys());
-        route.slice(ranges);
+        route.overlapping(ranges);
         PartialDeps deps = PartialDeps.builder(ranges, true).build();
 
         Command command = getBlocking(commandStore.submit(contextFor(txnId, route, SYNC, READ_WRITE, "Test"), safe -> {
@@ -205,10 +205,15 @@ public class AccordTaskTest
         }));
 
         // clear cache
-        try (ExclusiveGlobalCaches cache = commandStore.executor().lockCaches();)
+        long cacheSize;
+        try (ExclusiveGlobalCaches cache = commandStore.executor().lockCaches())
         {
-            long cacheSize = cache.global.capacity();
+            cacheSize = cache.global.capacity();
             cache.global.setCapacity(0);
+        }
+
+        try (ExclusiveGlobalCaches cache = commandStore.executor().lockCaches())
+        {
             cache.global.setCapacity(cacheSize);
         }
 
@@ -238,7 +243,7 @@ public class AccordTaskTest
         RoutingKey routingKey = partialTxn.keys().get(0).asKey().toUnseekable();
         FullRoute<?> route = partialTxn.keys().toRoute(routingKey);
         Ranges ranges = AccordTestUtils.fullRange(partialTxn.keys());
-        Route<?> partialRoute = route.slice(ranges);
+        Route<?> partialRoute = route.overlapping(ranges);
         PartialDeps deps = PartialDeps.builder(ranges, true).build();
 
         Command command = getBlocking(commandStore.submit(contextFor(txnId, route, SYNC, READ_WRITE, "Test"), safe -> {
@@ -250,10 +255,14 @@ public class AccordTaskTest
         }));
 
         // clear cache
+        long cacheSize;
         try (ExclusiveGlobalCaches cache = commandStore.executor().lockCaches();)
         {
-            long cacheSize = cache.global.capacity();
+            cacheSize = cache.global.capacity();
             cache.global.setCapacity(0);
+        }
+        try (ExclusiveGlobalCaches cache = commandStore.executor().lockCaches();)
+        {
             cache.global.setCapacity(cacheSize);
         }
 
@@ -280,57 +289,58 @@ public class AccordTaskTest
             .withExamples(50)
             .forAll(Gens.random(), Gens.lists(txnIdGen).ofSizeBetween(1, 2))
             .check((rs, ids) -> {
-            before(); // truncate tables
 
-            Participants<RoutingKey> participants = keys.toParticipants();
-            assertNoReferences(commandStore, ids, participants);
-            createCommand(commandStore, rs, ids);
-            awaitDone(commandStore, ids, participants);
-            assertNoReferences(commandStore, ids, participants);
+                before(); // truncate tables
 
-            PreLoadContext ctx = contextFor(ids.get(0), ids.size() == 1 ? null : ids.get(1), participants, SYNC, READ_WRITE, "Test");
-            Consumer<SafeCommandStore> consumer = Mockito.mock(Consumer.class);
+                Participants<RoutingKey> participants = keys.toParticipants();
+                assertNoReferences(commandStore, ids, participants);
+                createCommand(commandStore, rs, ids);
+                awaitDone(commandStore, ids, participants);
+                assertNoReferences(commandStore, ids, participants);
 
-            Map<TxnId, Boolean> failed = selectFailedTxn(rs, ids);
-            try (ExclusiveGlobalCaches caches = commandStore.executor().lockCaches())
-            {
-                caches.commands.unsafeSetLoadFunction((s, txnId) ->
+                PreLoadContext ctx = contextFor(ids.get(0), ids.size() == 1 ? null : ids.get(1), participants, SYNC, READ_WRITE, "Test");
+                Consumer<SafeCommandStore> consumer = Mockito.mock(Consumer.class);
+
+                Map<TxnId, Boolean> failed = selectFailedTxn(rs, ids);
+                try (ExclusiveGlobalCaches caches = commandStore.executor().lockCaches())
                 {
-                    logger.info("Attempting to load {}; expected to fail? {}", txnId, failed.get(txnId));
-                    if (!failed.get(txnId))
-                        return commandStore.loadCommand(txnId);
-                    throw new NullPointerException("txn_id " + txnId);
-                });
-            }
-            AccordTask<Void> o1 = AccordTask.create(commandStore, ctx, consumer);
-            AssertionUtils.assertThatThrownBy(() -> getBlocking(o1.chain()))
-                          .hasRootCause()
-                          .isInstanceOf(NullPointerException.class)
-                          .hasNoSuppressedExceptions();
+                    caches.commands.unsafeSetLoadFunction((s, txnId) ->
+                                                          {
+                                                              logger.info("Attempting to load {}; expected to fail? {}", txnId, failed.get(txnId));
+                                                              if (!failed.get(txnId))
+                                                                  return commandStore.loadCommand(txnId);
+                                                              throw new NullPointerException("txn_id " + txnId);
+                                                          });
+                }
+                AccordTask<Void> o1 = AccordTask.create(commandStore, ctx, consumer);
+                AssertionUtils.assertThatThrownBy(() -> getBlocking(o1.chain()))
+                              .hasRootCause()
+                              .isInstanceOf(NullPointerException.class)
+                              .hasNoSuppressedExceptions();
 
-            Mockito.verifyNoInteractions(consumer);
+                Mockito.verifyNoInteractions(consumer);
 
-            assertNoReferences(commandStore, ids, participants);
-            // the first failed load causes the whole operation to fail, so some ids may still be pending
-            // to make sure the next operation does not see a PENDING that will fail, wait for all loads to complete
-            awaitDone(commandStore, ids, participants);
+                assertNoReferences(commandStore, ids, participants);
+                // the first failed load causes the whole operation to fail, so some ids may still be pending
+                // to make sure the next operation does not see a PENDING that will fail, wait for all loads to complete
+                awaitDone(commandStore, ids, participants);
 
-            // can we recover?
-            try (ExclusiveGlobalCaches caches = commandStore.executor().lockCaches())
-            {
-                caches.commands.unsafeSetLoadFunction((s, txnId) -> {
-                    Command cmd = commandStore.loadCommand(txnId);
-                    return cmd;
+                // can we recover?
+                try (ExclusiveGlobalCaches caches = commandStore.executor().lockCaches())
+                {
+                    caches.commands.unsafeSetLoadFunction((s, txnId) -> {
+                        Command cmd = commandStore.loadCommand(txnId);
+                        return cmd;
+                    });
+                }
+                AccordTask<Void> o2 = AccordTask.create(commandStore, ctx, store -> {
+                    ids.forEach(id -> {
+                        store.ifInitialised(id).readyToExecute(store);
+                    });
                 });
-            }
-            AccordTask<Void> o2 = AccordTask.create(commandStore, ctx, store -> {
-                ids.forEach(id -> {
-                    store.ifInitialised(id).readyToExecute(store);
-                });
-            });
-            getBlocking(o2.chain());
-            awaitDone(commandStore, ids, participants);
-            assertNoReferences(commandStore, ids, participants);
+                getBlocking(o2.chain());
+                awaitDone(commandStore, ids, participants);
+                assertNoReferences(commandStore, ids, participants);
 
         });
     }

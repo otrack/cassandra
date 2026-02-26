@@ -19,16 +19,23 @@
 package org.apache.cassandra.tcm.sequences;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Collection;
+import java.util.List;
 import java.util.Objects;
 import java.util.Set;
 import java.util.stream.StreamSupport;
 
 import com.google.common.annotations.VisibleForTesting;
+import com.googlecode.concurrenttrees.common.Iterables;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import com.googlecode.concurrenttrees.common.Iterables;
+import accord.local.Node;
+import accord.topology.EpochReady;
+import accord.utils.async.AsyncResult;
+
 import org.apache.cassandra.config.CassandraRelevantProperties;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.SystemKeyspace;
@@ -43,7 +50,7 @@ import org.apache.cassandra.repair.autorepair.AutoRepairUtils;
 import org.apache.cassandra.schema.Schema;
 import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.service.accord.AccordService;
-import org.apache.cassandra.streaming.StreamState;
+import org.apache.cassandra.service.accord.IAccordService;
 import org.apache.cassandra.tcm.ClusterMetadata;
 import org.apache.cassandra.tcm.ClusterMetadataService;
 import org.apache.cassandra.tcm.Epoch;
@@ -67,10 +74,10 @@ import org.apache.cassandra.utils.vint.VIntCoding;
 
 import static com.google.common.collect.ImmutableList.of;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
+import static org.apache.cassandra.tcm.MultiStepOperation.Kind.JOIN;
 import static org.apache.cassandra.tcm.Transformation.Kind.FINISH_JOIN;
 import static org.apache.cassandra.tcm.Transformation.Kind.MID_JOIN;
 import static org.apache.cassandra.tcm.Transformation.Kind.START_JOIN;
-import static org.apache.cassandra.tcm.MultiStepOperation.Kind.JOIN;
 import static org.apache.cassandra.tcm.sequences.SequenceState.continuable;
 import static org.apache.cassandra.tcm.sequences.SequenceState.error;
 import static org.apache.cassandra.tcm.sequences.SequenceState.halted;
@@ -361,9 +368,29 @@ public class BootstrapAndJoin extends MultiStepOperation<Epoch>
         }
 
         StorageService.instance.repairPaxosForTopologyChange("bootstrap");
-        Future<StreamState> bootstrapStream = StorageService.instance.startBootstrap(metadata, beingReplaced, movements, strictMovements);
-        Future<?> accordReady = AccordService.instance().epochReadyFor(metadata);
-        Future<?> ready = FutureCombiner.allOf(bootstrapStream, accordReady);
+        List<Future<?>> bootstraps = new ArrayList<>();
+        if (AccordService.instance().isEnabled())
+        {
+            IAccordService service = AccordService.instance();
+            {
+                Future<?> ready = AccordService.toFuture(service.epochReadyFor(metadata, EpochReady::active));
+                logger.info("Waiting for Accord metadata to be ready");
+                ready.syncThrowUncheckedOnInterrupt();
+                ready.rethrowIfFailed();
+            }
+
+            logger.info("Accord metadata is ready, continuing with bootstrap");
+            bootstraps.add(service.epochReadyFor(metadata, EpochReady::reads));
+
+            Node node = service.node();
+            node.commandStores().forAllUnsafe(commandStore -> {
+                AsyncResult<EpochReady> ready = commandStore.resumeBootstrap(node);
+                bootstraps.add(AccordService.toFuture(ready.flatMap(e -> e.reads)));
+            });
+        }
+        bootstraps.add(StorageService.instance.startBootstrap(metadata, beingReplaced, movements, strictMovements));
+
+        Future<?> ready = FutureCombiner.allOf(bootstraps);
 
         try
         {

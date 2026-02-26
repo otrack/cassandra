@@ -38,17 +38,18 @@ import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
+import com.clearspring.analytics.stream.cardinality.CardinalityMergeException;
+import com.clearspring.analytics.stream.cardinality.ICardinality;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Ordering;
 import com.google.common.primitives.Longs;
 import com.google.common.util.concurrent.RateLimiter;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import com.clearspring.analytics.stream.cardinality.CardinalityMergeException;
-import com.clearspring.analytics.stream.cardinality.ICardinality;
 import org.apache.cassandra.concurrent.ExecutorPlus;
 import org.apache.cassandra.concurrent.ScheduledExecutorPlus;
 import org.apache.cassandra.concurrent.ScheduledExecutors;
@@ -114,6 +115,8 @@ import org.apache.cassandra.utils.concurrent.SharedCloseable;
 import org.apache.cassandra.utils.concurrent.UncheckedInterruptedException;
 
 import static org.apache.cassandra.concurrent.ExecutorFactory.Global.executorFactory;
+import static org.apache.cassandra.config.Config.DiskAccessMode;
+import static org.apache.cassandra.io.util.FileHandle.OnReaderClose;
 import static org.apache.cassandra.utils.TimeUUID.unixMicrosToRawTimestamp;
 import static org.apache.cassandra.utils.concurrent.BlockingQueues.newBlockingQueue;
 import static org.apache.cassandra.utils.concurrent.SharedCloseable.sharedCopyOrNull;
@@ -364,7 +367,7 @@ public abstract class SSTableReader extends SSTable implements UnfilteredSource,
 
     public static SSTableReader open(SSTable.Owner owner, Descriptor desc, TableMetadataRef metadata)
     {
-        return open(owner, desc,  null, metadata);
+        return open(owner, desc, null, metadata);
     }
 
     public static SSTableReader open(SSTable.Owner owner, Descriptor descriptor, Set<Component> components, TableMetadataRef metadata)
@@ -926,7 +929,16 @@ public abstract class SSTableReader extends SSTable implements UnfilteredSource,
     /**
      * Returns a {@link KeyReader} over all keys in the sstable.
      */
-    public abstract KeyReader keyReader() throws IOException;
+    public final KeyReader keyReader() throws IOException {
+        return keyReader(false);
+    }
+
+    /**
+     * Returns a {@link KeyReader} over all keys in the sstable.
+     *
+     * @param detailed should the iterator also provide details per partition entry(e.g. row entry details)
+     */
+    public abstract KeyReader keyReader(boolean detailed) throws IOException;
 
     /**
      * Returns a {@link KeyReader} over all keys in the sstable after a given key.
@@ -1065,11 +1077,16 @@ public abstract class SSTableReader extends SSTable implements UnfilteredSource,
      */
     public ISSTableScanner getScanner()
     {
+        return getScanner(dfile.diskAccessMode());
+    }
+
+    public ISSTableScanner getScanner(DiskAccessMode diskAccessMode)
+    {
         PartitionPositionBounds fullRange = getPositionsForFullRange();
         if (fullRange != null)
-            return new SSTableSimpleScanner(this, Collections.singletonList(fullRange));
+            return new SSTableSimpleScanner(this, Collections.singletonList(fullRange), diskAccessMode);
         else
-            return new SSTableSimpleScanner(this, Collections.emptyList());
+            return new SSTableSimpleScanner(this, Collections.emptyList(), diskAccessMode);
     }
 
     /**
@@ -1080,10 +1097,15 @@ public abstract class SSTableReader extends SSTable implements UnfilteredSource,
      */
     public ISSTableScanner getScanner(Collection<Range<Token>> ranges)
     {
+        return getScanner(ranges, dfile.diskAccessMode());
+    }
+
+    public ISSTableScanner getScanner(Collection<Range<Token>> ranges, DiskAccessMode diskAccessMode)
+    {
         if (ranges != null)
-            return new SSTableSimpleScanner(this, getPositionsForRanges(ranges));
+            return new SSTableSimpleScanner(this, getPositionsForRanges(ranges), diskAccessMode);
         else
-            return getScanner();
+            return getScanner(diskAccessMode);
     }
 
     /**
@@ -1094,13 +1116,13 @@ public abstract class SSTableReader extends SSTable implements UnfilteredSource,
      */
     public ISSTableScanner getScanner(Iterator<AbstractBounds<PartitionPosition>> boundsIterator)
     {
-        return new SSTableSimpleScanner(this, getPositionsForBoundsIterator(boundsIterator));
+        return new SSTableSimpleScanner(this, getPositionsForBoundsIterator(boundsIterator), dfile.diskAccessMode());
     }
 
     public ISSTableScanner getScanner(AbstractBounds<PartitionPosition> bounds)
     {
         PartitionPositionBounds positionBounds = getPositionsForBounds(bounds);
-        return new SSTableSimpleScanner(this, positionBounds == null ? Collections.emptyList() : Collections.singletonList(positionBounds));
+        return new SSTableSimpleScanner(this, positionBounds == null ? Collections.emptyList() : Collections.singletonList(positionBounds), dfile.diskAccessMode());
     }
 
 
@@ -1408,7 +1430,29 @@ public abstract class SSTableReader extends SSTable implements UnfilteredSource,
 
     public RandomAccessReader openDataReaderForScan()
     {
-        return dfile.createReaderForScan();
+        return openDataReaderForScan(dfile.diskAccessMode());
+    }
+
+    public RandomAccessReader openDataReaderForScan(DiskAccessMode diskAccessMode)
+    {
+        boolean isSameDiskAccessMode = diskAccessMode == dfile.diskAccessMode();
+        boolean isDirectIONotSupported = diskAccessMode == DiskAccessMode.direct && !dfile.supportsDirectIO();
+
+        if (isSameDiskAccessMode || isDirectIONotSupported)
+            return dfile.createReaderForScan(OnReaderClose.RETAIN_FILE_OPEN);
+
+        FileHandle dataFile = dfile.toBuilder()
+                                   .withDiskAccessMode(diskAccessMode)
+                                   .complete();
+        try
+        {
+            return dataFile.createReaderForScan(OnReaderClose.CLOSE_FILE);
+        }
+        catch (Throwable t)
+        {
+            dataFile.close();
+            throw t;
+        }
     }
 
     public void trySkipFileCacheBefore(DecoratedKey key)

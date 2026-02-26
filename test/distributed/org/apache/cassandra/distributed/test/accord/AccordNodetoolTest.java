@@ -23,17 +23,18 @@ import java.util.HashMap;
 import java.util.Map;
 
 import com.google.common.collect.ImmutableSet;
+
 import org.junit.Test;
 
 import accord.local.Node;
-import org.apache.cassandra.tcm.ClusterMetadata;
+
 import org.apache.cassandra.distributed.Cluster;
 import org.apache.cassandra.distributed.api.Feature;
 import org.apache.cassandra.distributed.test.TestBaseImpl;
+import org.apache.cassandra.tcm.ClusterMetadata;
 
-
-import static org.junit.Assert.assertEquals;
 import static org.apache.cassandra.distributed.shared.ClusterUtils.getNodeId;
+import static org.junit.Assert.assertEquals;
 
 public class AccordNodetoolTest extends TestBaseImpl
 {
@@ -43,7 +44,7 @@ public class AccordNodetoolTest extends TestBaseImpl
         try (Cluster cluster = init(builder().withNodes(3).withConfig((config) -> config.with(Feature.NETWORK, Feature.GOSSIP)).start()))
         {
             cluster.get(1).nodetoolResult("accord", "mark_stale", "1").asserts().success();
-            cluster.get(1).runOnInstance(() -> assertEquals(ImmutableSet.of(new Node.Id(1)), ClusterMetadata.current().accordStaleReplicas.ids()));
+            cluster.get(1).runOnInstance(() -> assertEquals(ImmutableSet.of(new Node.Id(1)), ClusterMetadata.current().accordStaleReplicas.stale()));
             cluster.get(1).nodetoolResult("accord", "describe").asserts().stdoutContains("Stale Replicas: 1");
 
             // Reject the operation if the target node is already stale:
@@ -56,7 +57,7 @@ public class AccordNodetoolTest extends TestBaseImpl
             cluster.get(1).nodetoolResult("accord", "mark_stale", "4").asserts().failure().errorContains("not present in the directory");
             
             cluster.get(1).nodetoolResult("accord", "mark_rejoining", "1").asserts().success();
-            cluster.get(1).runOnInstance(() -> assertEquals(Collections.emptySet(), ClusterMetadata.current().accordStaleReplicas.ids()));
+            cluster.get(1).runOnInstance(() -> assertEquals(Collections.emptySet(), ClusterMetadata.current().accordStaleReplicas.stale()));
 
             cluster.get(1).nodetoolResult("accord", "mark_rejoining", "1").asserts().failure().errorContains("it is not stale");
             cluster.get(1).nodetoolResult("accord", "mark_rejoining", "4").asserts().failure().errorContains("not present in the directory");
@@ -72,7 +73,7 @@ public class AccordNodetoolTest extends TestBaseImpl
             cluster.get(1).nodetoolResult("accord", "mark_stale", "1", "2", "3").asserts().failure().errorContains("that would leave fewer than a quorum");
 
             cluster.get(1).nodetoolResult("accord", "mark_stale", "1", "2").asserts().success();
-            cluster.get(1).runOnInstance(() -> assertEquals(ImmutableSet.of(new Node.Id(1), new Node.Id(2)), ClusterMetadata.current().accordStaleReplicas.ids()));
+            cluster.get(1).runOnInstance(() -> assertEquals(ImmutableSet.of(new Node.Id(1), new Node.Id(2)), ClusterMetadata.current().accordStaleReplicas.stale()));
             cluster.get(1).nodetoolResult("accord", "describe").asserts().stdoutContains("Stale Replicas: 1,2");
 
             // Reject the operation if a target node is already stale:
@@ -89,11 +90,11 @@ public class AccordNodetoolTest extends TestBaseImpl
             cluster.get(nodeIdToNode.get(2)).shutdown().get();
             cluster.get(1).nodetoolResult("removenode", "2", "--force").asserts().success();
             cluster.get(1).nodetoolResult("cms", "unregister", "2").asserts().success();
-            cluster.get(1).runOnInstance(() -> assertEquals(ImmutableSet.of(new Node.Id(1)), ClusterMetadata.current().accordStaleReplicas.ids()));
+            cluster.get(1).runOnInstance(() -> assertEquals(ImmutableSet.of(new Node.Id(1)), ClusterMetadata.current().accordStaleReplicas.stale()));
 
             cluster.get(1).nodetoolResult("accord", "mark_rejoining", "1", "3").asserts().failure().errorContains("it is not stale");
             cluster.get(1).nodetoolResult("accord", "mark_rejoining", "1", "6").asserts().failure().errorContains("not present in the directory");
-            cluster.get(1).runOnInstance(() -> assertEquals(ImmutableSet.of(new Node.Id(1)), ClusterMetadata.current().accordStaleReplicas.ids()));
+            cluster.get(1).runOnInstance(() -> assertEquals(ImmutableSet.of(new Node.Id(1)), ClusterMetadata.current().accordStaleReplicas.stale()));
         }
     }
 }

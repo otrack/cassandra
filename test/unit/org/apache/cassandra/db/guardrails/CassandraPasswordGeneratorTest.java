@@ -21,9 +21,8 @@ package org.apache.cassandra.db.guardrails;
 import java.util.Arrays;
 import java.util.List;
 
-import org.junit.Test;
-
 import org.assertj.core.api.Assertions;
+import org.junit.Test;
 import org.passay.CharacterRule;
 import org.passay.EnglishCharacterData;
 import org.passay.LengthRule;
@@ -69,7 +68,6 @@ public class CassandraPasswordGeneratorTest
         CassandraPasswordValidator validator = new CassandraPasswordValidator(config);
 
         assertEquals(20, generator.generate(validator).length());
-        assertEquals(30, generator.generate(30, validator).length());
     }
 
     @Test

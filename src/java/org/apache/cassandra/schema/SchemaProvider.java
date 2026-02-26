@@ -25,6 +25,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+
 import javax.annotation.Nullable;
 
 import org.apache.cassandra.cql3.ColumnIdentifier;
@@ -51,7 +52,10 @@ public interface SchemaProvider
 
     default UUID getVersion()
     {
-        return ClusterMetadata.current().schema.getVersion();
+        ClusterMetadata metadata = ClusterMetadata.currentNullable();
+        if (metadata == null)
+            return null;
+        return metadata.schema.getVersion();
     }
 
     Keyspaces localKeyspaces();
