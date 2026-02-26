@@ -2740,7 +2740,7 @@ accord:
  command_store_shard_count: -1
 
  # Recover delay: the time between a transaction being initiated and a remote replica being willing to interrupt it to complete it
- recover_delay: 1s
+ # recover_delay: 1s
 
  # how quickly the fast path is reconfigured when nodes go up/down
  fast_path_update_delay: 5s
