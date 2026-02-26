@@ -2147,15 +2147,16 @@ audit_logging_options:
 
 # default options for full query logging - these can be overridden from command line when executing
 # nodetool enablefullquerylog
-# full_query_logging_options:
+full_query_logging_options:
+  enabled: false
   # log_dir:
   # roll_cycle: FAST_HOURLY
   # block: true
   # max_queue_weight: 268435456 # 256 MiB
   # max_log_size: 17179869184 # 16 GiB
-  ## archive command is "/path/to/script.sh %path" where %path is replaced with the file being rolled:
+  # archive command is "/path/to/script.sh %path" where %path is replaced with the file being rolled:
   # archive_command:
-  ## note that enabling this allows anyone with JMX/nodetool access to run local shell commands as the user running cassandra
+  # note that enabling this allows anyone with JMX/nodetool access to run local shell commands as the user running cassandra
   # allow_nodetool_archive_command: false
   # max_archive_retries: 10
 
