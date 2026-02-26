@@ -2728,7 +2728,7 @@ storage_compatibility_mode: NONE
 
 accord:
  # Enables the execution of Accord (multi-key) transactions on this node.
- enabled: false
+ enabled: true
 
  # Journal directory for Accord
  journal_directory: /tmp
