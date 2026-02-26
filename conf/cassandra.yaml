@@ -1562,7 +1562,7 @@ slow_query_log_timeout: 500ms
 #
 # You can use a custom Snitch by setting this to the full class name
 # of the snitch, which will be assumed to be on your classpath.
-endpoint_snitch: SimpleSnitch
+endpoint_snitch: GossipingPropertyFileSnitch
 
 # The settings in the following section are intended to supercede the use of endpoint_snitch:
 # initial_location_provider
@@ -1927,7 +1927,7 @@ internode_compression: dc
 # Disabling it will result in larger (but fewer) network packets being sent,
 # reducing overhead from the TCP protocol itself, at the cost of increasing
 # latency if you block for cross-datacenter responses.
-inter_dc_tcp_nodelay: false
+inter_dc_tcp_nodelay: true
 
 # TTL for different trace types used during logging of the repair process.
 # Min unit: s
