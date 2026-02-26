@@ -21,6 +21,7 @@ The most commonly used nodetool commands are:
     compact                             Force a (major) compaction on one or more tables or user-defined compaction on given SSTables
     compactionhistory                   Print history of compaction
     compactionstats                     Print statistics on compactions
+    compressiondictionary               Manage compression dictionaries
     consensus_admin                     List and mark ranges as migrating between consensus protocols
     datapaths                           Print all directories where data of tables are stored
     decommission                        Decommission the *node I am connecting to*
@@ -96,6 +97,7 @@ The most commonly used nodetool commands are:
     move                                Move node on the token ring to a new token
     netstats                            Print network information on provided host (connecting node by default)
     pausehandoff                        Pause hints delivery process
+    profile                             Manage Async-Profiler on a Cassandra process
     profileload                         Low footprint profiling of activity for a period of time
     proxyhistograms                     Print statistic histograms for network operations
     rangekeysample                      Shows the sampled keys held across all keyspaces

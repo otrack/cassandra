@@ -24,6 +24,7 @@ import java.util.function.Supplier;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableList;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -87,12 +88,25 @@ public class SystemKeyspaceStorage implements LogStorage
 
     public synchronized static boolean hasAnyEpoch()
     {
-        String query = String.format("SELECT epoch FROM %s.%s LIMIT 1", SchemaConstants.SYSTEM_KEYSPACE_NAME, NAME);
+        String query = String.format("SELECT epoch, kind FROM %s.%s LIMIT 2", SchemaConstants.SYSTEM_KEYSPACE_NAME, NAME);
 
+        int count = 0;
+        long preInitializeEpoch = -1;
         for (UntypedResultSet.Row row : executeInternal(query))
-            return true;
+        {
+            count++;
+            if (Transformation.Kind.fromId(row.getInt("kind")) == Transformation.Kind.PRE_INITIALIZE_CMS)
+                preInitializeEpoch = row.getLong("epoch");
+        }
+        if (count == 1 && preInitializeEpoch != -1)
+        {
+            logger.warn("Cleaning up orphaned PreInitialize at epoch {} - restarting in gossip mode", preInitializeEpoch);
+            String cleanupQuery = String.format("DELETE from %s.%s where epoch = %d", SchemaConstants.SYSTEM_KEYSPACE_NAME, NAME, preInitializeEpoch);
+            executeInternal(cleanupQuery);
+            return false;
+        }
 
-        return false;
+        return count > 0;
     }
 
     @Override

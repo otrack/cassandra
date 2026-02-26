@@ -35,7 +35,14 @@ import org.apache.cassandra.config.ParameterizedClass;
 import org.apache.cassandra.db.TypeSizes;
 import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.io.IVersionedSerializer;
-import org.apache.cassandra.io.compress.*;
+import org.apache.cassandra.io.compress.DeflateCompressor;
+import org.apache.cassandra.io.compress.ICompressor;
+import org.apache.cassandra.io.compress.IDictionaryCompressor;
+import org.apache.cassandra.io.compress.LZ4Compressor;
+import org.apache.cassandra.io.compress.NoopCompressor;
+import org.apache.cassandra.io.compress.SnappyCompressor;
+import org.apache.cassandra.io.compress.ZstdCompressor;
+import org.apache.cassandra.io.compress.ZstdDictionaryCompressor;
 import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.net.MessagingService;
@@ -160,15 +167,31 @@ public final class CompressionParams
         return new CompressionParams(LZ4Compressor.create(Collections.emptyMap()), chunkLength, maxCompressedLength, calcMinCompressRatio(chunkLength, maxCompressedLength), Collections.emptyMap());
     }
 
+    @VisibleForTesting
     public static CompressionParams zstd()
     {
-        return zstd(DEFAULT_CHUNK_LENGTH);
+        return zstd(DEFAULT_CHUNK_LENGTH, false);
     }
 
+    @VisibleForTesting
     public static CompressionParams zstd(Integer chunkLength)
     {
-        ZstdCompressor compressor = ZstdCompressor.create(Collections.emptyMap());
-        return new CompressionParams(compressor, chunkLength, Integer.MAX_VALUE, DEFAULT_MIN_COMPRESS_RATIO, Collections.emptyMap());
+        return zstd(chunkLength, false);
+    }
+
+    @VisibleForTesting
+    public static CompressionParams zstd(Integer chunkLength, boolean useDictionary)
+    {
+        return zstd(chunkLength, useDictionary, Collections.emptyMap());
+    }
+
+    @VisibleForTesting
+    public static CompressionParams zstd(Integer chunkLength, boolean useDictionary, Map<String, String> options)
+    {
+        ICompressor compressor = useDictionary
+                                 ? ZstdDictionaryCompressor.create(options)
+                                 : ZstdCompressor.create(options);
+        return new CompressionParams(compressor, chunkLength, Integer.MAX_VALUE, DEFAULT_MIN_COMPRESS_RATIO, options);
     }
 
     @VisibleForTesting
@@ -221,6 +244,18 @@ public final class CompressionParams
     public boolean isEnabled()
     {
         return sstableCompressor != null;
+    }
+
+    /**
+     * Checks if dictionary compression is enabled for this configuration.
+     * Dictionary compression is enabled when both compression is enabled and
+     * the compressor supports dictionary-based compression.
+     *
+     * @return {@code true} if dictionary compression is enabled, {@code false} otherwise.
+     */
+    public boolean isDictionaryCompressionEnabled()
+    {
+        return isEnabled() && sstableCompressor instanceof IDictionaryCompressor;
     }
 
     /**

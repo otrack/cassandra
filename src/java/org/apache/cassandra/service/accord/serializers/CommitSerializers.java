@@ -29,6 +29,7 @@ import accord.primitives.Participants;
 import accord.primitives.Route;
 import accord.primitives.Timestamp;
 import accord.primitives.TxnId;
+
 import org.apache.cassandra.db.TypeSizes;
 import org.apache.cassandra.io.UnversionedSerializer;
 import org.apache.cassandra.io.util.DataInputPlus;
@@ -52,9 +53,9 @@ public class CommitSerializers
             kind.serialize(msg.kind, out);
             CommandSerializers.ballot.serialize(msg.ballot, out);
             ExecuteAtSerializer.serialize(msg.txnId, msg.executeAt, out);
-            CommandSerializers.nullablePartialTxn.serialize(msg.partialTxn, out, version);
+            CommandSerializers.nullablePartialTxn.serialize(msg.partialTxn(), out, version);
             if (msg.kind.withDeps == Commit.WithDeps.HasDeps)
-                DepsSerializers.partialDeps.serialize(msg.partialDeps, out);
+                DepsSerializers.partialDeps.serialize(msg.partialDeps(), out);
             serializeNullable(msg.route, out, KeySerializers.fullRoute);
         }
 
@@ -78,10 +79,10 @@ public class CommitSerializers
             long size = kind.serializedSize(msg.kind)
                    + CommandSerializers.ballot.serializedSize(msg.ballot)
                    + ExecuteAtSerializer.serializedSize(msg.txnId, msg.executeAt)
-                   + CommandSerializers.nullablePartialTxn.serializedSize(msg.partialTxn, version);
+                   + CommandSerializers.nullablePartialTxn.serializedSize(msg.partialTxn(), version);
 
             if (msg.kind.withDeps == Commit.WithDeps.HasDeps)
-                size += DepsSerializers.partialDeps.serializedSize(msg.partialDeps);
+                size += DepsSerializers.partialDeps.serializedSize(msg.partialDeps());
 
             size += serializedNullableSize(msg.route, KeySerializers.fullRoute);
             return size;

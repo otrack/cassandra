@@ -26,6 +26,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.TimeUnit;
+
 import javax.management.remote.JMXConnector;
 import javax.management.remote.JMXConnectorServer;
 import javax.management.remote.JMXServiceURL;
@@ -33,6 +34,7 @@ import javax.management.remote.rmi.RMIConnectorServer;
 import javax.management.remote.rmi.RMIJRMPServerImpl;
 
 import com.google.common.util.concurrent.Uninterruptibles;
+
 import org.slf4j.Logger;
 
 import org.apache.cassandra.config.EncryptionOptions;
@@ -40,10 +42,11 @@ import org.apache.cassandra.config.JMXServerOptions;
 import org.apache.cassandra.distributed.api.IInstance;
 import org.apache.cassandra.distributed.api.IInstanceConfig;
 import org.apache.cassandra.distributed.shared.JMXUtil;
+import org.apache.cassandra.distributed.shared.jmx.RMICloseableClientSocketFactory;
+import org.apache.cassandra.distributed.shared.jmx.RMICloseableServerSocketFactory;
 import org.apache.cassandra.utils.JMXServerUtils;
 import org.apache.cassandra.utils.MBeanWrapper;
-import org.apache.cassandra.utils.RMICloseableClientSocketFactory;
-import org.apache.cassandra.utils.RMICloseableServerSocketFactory;
+
 import sun.rmi.transport.tcp.TCPEndpoint;
 
 import static org.apache.cassandra.config.CassandraRelevantProperties.JAVA_RMI_DGC_LEASE_VALUE_IN_JVM_DTEST;

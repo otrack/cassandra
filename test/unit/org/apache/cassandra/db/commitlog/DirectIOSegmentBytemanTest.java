@@ -18,8 +18,12 @@
 
 package org.apache.cassandra.db.commitlog;
 
-import org.apache.cassandra.io.util.File;
+import java.io.IOException;
+import java.nio.file.Files;
 
+import org.jboss.byteman.contrib.bmunit.BMRule;
+import org.jboss.byteman.contrib.bmunit.BMRules;
+import org.jboss.byteman.contrib.bmunit.BMUnitRunner;
 import org.junit.BeforeClass;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -27,12 +31,7 @@ import org.junit.runner.RunWith;
 import org.apache.cassandra.config.Config;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.exceptions.ConfigurationException;
-import org.jboss.byteman.contrib.bmunit.BMRule;
-import org.jboss.byteman.contrib.bmunit.BMRules;
-import org.jboss.byteman.contrib.bmunit.BMUnitRunner;
-
-import java.io.IOException;
-import java.nio.file.Files;
+import org.apache.cassandra.io.util.File;
 
 import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 
@@ -54,7 +53,7 @@ public class DirectIOSegmentBytemanTest
     @Test
     @BMRules(rules = { @BMRule(name = "Commitlog dir do not support direct io",
     targetClass = "FileUtils",
-    targetMethod = "getBlockSize",
+    targetMethod = "blockSize",
     action = "return 0;") } )
     public void testDirectIOUnSupportWithDirectConfig()
     {

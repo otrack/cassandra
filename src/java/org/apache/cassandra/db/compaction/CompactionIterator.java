@@ -28,14 +28,20 @@ import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.function.LongPredicate;
 import java.util.function.Supplier;
+
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.Ordering;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import accord.local.Cleanup;
 import accord.local.DurableBefore;
 import accord.local.RedundantBefore;
 import accord.utils.Invariants;
 import accord.utils.UnhandledEnum;
-import com.google.common.annotations.VisibleForTesting;
-import com.google.common.collect.ImmutableSet;
-import com.google.common.collect.Ordering;
+
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.ColumnIdentifier;
 import org.apache.cassandra.db.AbstractCompactionController;
@@ -105,9 +111,6 @@ import org.apache.cassandra.utils.NoSpamLogger.NoSpamLogStatement;
 import org.apache.cassandra.utils.TimeUUID;
 import org.apache.cassandra.utils.btree.BTree;
 import org.apache.cassandra.utils.btree.UpdateFunction;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
 
 import static accord.local.Cleanup.ERASE;
 import static accord.local.Cleanup.Input.PARTIAL;
@@ -181,7 +184,14 @@ public class CompactionIterator extends CompactionInfo.Holder implements Unfilte
                               TopPartitionTracker.Collector topPartitionCollector)
     {
         this(type, scanners, controller, nowInSec, compactionId, activeCompactions, topPartitionCollector,
-             AccordService.isSetup() ? AccordService.instance() : null);
+             accord(controller));
+    }
+
+    private static IAccordService accord(AbstractCompactionController controller)
+    {
+        IAccordService accord = AccordService.tryGetUnsafe();
+        Invariants.require(accord != null || (!isAccordJournal(controller.cfs) && !isAccordCommandsForKey(controller.cfs)));
+        return accord;
     }
 
     public CompactionIterator(OperationType type,
@@ -194,7 +204,7 @@ public class CompactionIterator extends CompactionInfo.Holder implements Unfilte
                               IAccordService accord)
     {
         this(type, scanners, controller, nowInSec, compactionId, activeCompactions, topPartitionCollector,
-             () -> accord.getCompactionInfo(),
+             () -> Invariants.nonNull(accord).getCompactionInfo(),
              () -> Version.fromVersion(accord.journalConfiguration().userVersion()));
     }
 

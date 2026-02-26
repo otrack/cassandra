@@ -18,7 +18,18 @@
 
 package org.apache.cassandra.fuzz.topology;
 
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.function.Supplier;
+
+import org.junit.Test;
+
 import accord.primitives.Range;
+
 import org.apache.cassandra.distributed.Cluster;
 import org.apache.cassandra.distributed.api.ConsistencyLevel;
 import org.apache.cassandra.distributed.shared.ClusterUtils;
@@ -32,10 +43,6 @@ import org.apache.cassandra.harry.gen.Generator;
 import org.apache.cassandra.harry.gen.SchemaGenerators;
 import org.apache.cassandra.service.accord.AccordService;
 import org.apache.cassandra.service.consensus.TransactionalMode;
-import org.junit.Test;
-
-import java.util.*;
-import java.util.function.Supplier;
 
 import static org.apache.cassandra.harry.checker.TestHelper.withRandom;
 
@@ -150,9 +157,9 @@ public class AccordBounceTest extends FuzzTestBase
                 // Command Stores should not be lost on bounce
                 Map<Integer, Set<String>> before = cluster.get(1).callOnInstance(() -> {
                     Map<Integer, Set<String>> m = new HashMap<>();
-                    AccordService.instance().node().commandStores().forEach((store, ranges) -> {
+                    AccordService.instance().node().commandStores().forAllUnsafe((store) -> {
                         Set<String> set = new HashSet<>();
-                        for (Range range : ranges.all())
+                        for (Range range : store.unsafeGetRangesForEpoch().all())
                             set.add(range.toString());
                         m.put(store.id(), set);
                     });
@@ -169,9 +176,9 @@ public class AccordBounceTest extends FuzzTestBase
 
                     Map<Integer, Set<String>> after = cluster.get(1).callOnInstance(() -> {
                         Map<Integer, Set<String>> m = new HashMap<>();
-                        AccordService.instance().node().commandStores().forEach((store, ranges) -> {
+                        AccordService.instance().node().commandStores().forAllUnsafe(store -> {
                             Set<String> set = new HashSet<>();
-                            for (Range range : ranges.all())
+                            for (Range range : store.unsafeGetRangesForEpoch().all())
                                 set.add(range.toString());
                             m.put(store.id(), set);
                         });

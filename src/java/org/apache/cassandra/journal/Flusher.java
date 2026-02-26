@@ -22,11 +22,13 @@ import java.util.concurrent.locks.LockSupport;
 
 import javax.annotation.Nullable;
 
+import com.codahale.metrics.Timer;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import accord.utils.Invariants;
-import com.codahale.metrics.Timer;
+
 import org.apache.cassandra.concurrent.Interruptible;
 import org.apache.cassandra.concurrent.Interruptible.TerminateException;
 import org.apache.cassandra.utils.MonotonicClock;
@@ -102,10 +104,12 @@ final class Flusher<K, V>
 
     void shutdown() throws InterruptedException
     {
+        logger.debug("Shutting down " + flushExecutor + " and awaiting termination");
         flushExecutor.shutdown();
         flushExecutor.awaitTermination(1, MINUTES);
         if (fsyncExecutor != null)
         {
+            logger.debug("Shutting down " + fsyncExecutor + " and awaiting termination");
             fsyncExecutor.shutdownNow(); // `now` to interrupt potentially parked runnable
             fsyncExecutor.awaitTermination(1, MINUTES);
         }

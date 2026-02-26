@@ -18,6 +18,7 @@
 package org.apache.cassandra.db.rows;
 
 import java.util.Comparator;
+
 import javax.annotation.Nonnull;
 
 import com.google.common.base.Function;
@@ -279,6 +280,9 @@ public abstract class ColumnData implements IMeasurableMemory
     }
 
     public abstract ColumnData clone(Cloner cloner);
+
+    public abstract int estimateCloneSize(Cloner cloner);
+
 
     /**
      * Returns a copy of the data where all timestamps for live data have replaced by {@code newTimestamp} and

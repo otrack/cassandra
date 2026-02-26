@@ -22,11 +22,12 @@ import java.io.IOException;
 import java.util.concurrent.Callable;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-import org.junit.Test;
-
 import net.bytebuddy.ByteBuddy;
 import net.bytebuddy.dynamic.loading.ClassLoadingStrategy;
 import net.bytebuddy.implementation.bind.annotation.SuperCall;
+
+import org.junit.Test;
+
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.distributed.Cluster;
 import org.apache.cassandra.distributed.api.Feature;
@@ -54,6 +55,7 @@ public class IndexBuildFailsAfterStreamingTest extends TestBaseImpl
                                                              .set("disk_failure_policy", "die"))
                                            .start()))
         {
+            cluster.setUncaughtExceptionsFilter(t -> t.getMessage().equals("On purpose fail 2i build"));
             cluster.schemaChange(withKeyspace("CREATE TABLE %s.tbl (p int, c int, v int, PRIMARY KEY(p, c))"));
             cluster.schemaChange(withKeyspace("CREATE INDEX idx ON %s.tbl(v)"));
 

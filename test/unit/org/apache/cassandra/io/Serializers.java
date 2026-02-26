@@ -20,12 +20,15 @@ package org.apache.cassandra.io;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.util.function.BiConsumer;
+
+import org.assertj.core.api.Assertions;
 
 import accord.utils.LazyToString;
 import accord.utils.ReflectionUtils;
+
 import org.apache.cassandra.io.util.DataInputBuffer;
 import org.apache.cassandra.io.util.DataOutputBuffer;
-import org.assertj.core.api.Assertions;
 
 public class Serializers
 {
@@ -34,6 +37,13 @@ public class Serializers
 
     public static <T> void testSerde(DataOutputBuffer output, AsymmetricUnversionedSerializer<T, T> serializer, T input) throws IOException
     {
+        testSerde(output, serializer, input, (actual, expected) -> Assertions.assertThat(actual)
+                                                                             .describedAs("The deserialized output does not match the serialized input; difference %s", new LazyToString(() -> ReflectionUtils.recursiveEquals(actual, input).toString()))
+                                                                             .isEqualTo(expected));
+    }
+
+    public static <T> void testSerde(DataOutputBuffer output, AsymmetricUnversionedSerializer<T, T> serializer, T input, BiConsumer<T, T> testEqual) throws IOException
+    {
         output.clear();
         long expectedSize = serializer.serializedSize(input);
         serializer.serialize(input, output);
@@ -41,7 +51,7 @@ public class Serializers
         ByteBuffer buffer = output.unsafeGetBufferAndFlip();
         DataInputBuffer in = new DataInputBuffer(buffer, false);
         T read = serializer.deserialize(in);
-        Assertions.assertThat(read).describedAs("The deserialized output does not match the serialized input; difference %s", new LazyToString(() -> ReflectionUtils.recursiveEquals(read, input).toString())).isEqualTo(input);
+        testEqual.accept(read, input);
         Assertions.assertThat(buffer.remaining()).describedAs("deserialize did not consume all the serialized input").isEqualTo(0);
         buffer.flip();
         buffer.mark();

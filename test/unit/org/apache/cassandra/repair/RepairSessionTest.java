@@ -26,6 +26,7 @@ import java.util.UUID;
 import java.util.concurrent.ExecutionException;
 
 import com.google.common.collect.Sets;
+
 import org.junit.BeforeClass;
 import org.junit.Test;
 
@@ -66,8 +67,8 @@ public class RepairSessionTest
         RepairSession session = new RepairSession(SharedContext.Global.instance, new Scheduler.NoopScheduler(), parentSessionId,
                                                   new CommonRange(endpoints, Collections.emptySet(), Arrays.asList(repairRange)),
                                                   false, "Keyspace1", RepairParallelism.SEQUENTIAL,
-                                                  false, false, PreviewKind.NONE, false,
-                                                  false, false, false, false, "Standard1");
+                                                  false, false, false, PreviewKind.NONE, false,
+                                                  false, false, false, false, false, "Standard1");
 
         // perform convict
         session.convict(remote, Double.MAX_VALUE);

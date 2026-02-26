@@ -19,14 +19,16 @@
 package org.apache.cassandra.db.guardrails;
 
 import java.util.Collections;
-import java.util.Map;
 import java.util.Set;
 import java.util.function.Function;
 import java.util.stream.Collectors;
+
 import javax.annotation.Nullable;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableSet;
+
 import org.apache.commons.lang3.StringUtils;
 
 import org.apache.cassandra.config.CassandraRelevantProperties;
@@ -39,6 +41,7 @@ import org.apache.cassandra.db.compaction.TimeWindowCompactionStrategy;
 import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.service.ClientState;
 import org.apache.cassandra.service.disk.usage.DiskUsageBroadcaster;
+import org.apache.cassandra.utils.JsonUtils;
 import org.apache.cassandra.utils.MBeanWrapper;
 
 import static java.lang.String.format;
@@ -142,6 +145,17 @@ public final class Guardrails implements GuardrailsMBean
                  state -> CONFIG_PROVIDER.getOrCreate(state).getTablePropertiesIgnored(),
                  state -> CONFIG_PROVIDER.getOrCreate(state).getTablePropertiesDisallowed(),
                  "Table Properties");
+
+    /**
+     * Guardrail warning about, ignoring or rejecting the usage of certain keyspace properties.
+     */
+    public static final Values<String> keyspaceProperties =
+    new Values<>("keyspace_properties",
+                 null,
+                 state -> CONFIG_PROVIDER.getOrCreate(state).getKeyspacePropertiesWarned(),
+                 state -> CONFIG_PROVIDER.getOrCreate(state).getKeyspacePropertiesIgnored(),
+                 state -> CONFIG_PROVIDER.getOrCreate(state).getKeyspacePropertiesDisallowed(),
+                 "Keyspace Properties");
 
     /**
      * Guardrail disabling user-provided timestamps.
@@ -543,10 +557,29 @@ public final class Guardrails implements GuardrailsMBean
                      isWarning ? "Replica disk usage exceeds warning threshold"
                                : "Write request failed because disk usage exceeds failure threshold");
     /**
+     * Guardrail on the data disk usage of replicas across a datacenter which replicates a given keyspace.
+     * This is used at write time to verify the status of any node which might replicate a given keyspace.
+     */
+    public static final Predicates<String> diskUsageKeyspaceWideProtection =
+    new Predicates<>("disk_usage_keyspace_wide_protection",
+                     null,
+                     state -> DiskUsageBroadcaster.instance::isDatacenterStuffed,
+                     state -> DiskUsageBroadcaster.instance::isDatacenterFull,
+                     (isWarning, value) ->
+                     isWarning ? "Disk usage in keyspace datacenter exceeds warning threshold"
+                               : "Write request failed because disk usage exceeds failure threshold in keyspace datacenter.");
+
+    /**
      * Guardrail on passwords for CREATE / ALTER ROLE statements.
      */
-    public static final PasswordGuardrail password =
-    new PasswordGuardrail(() -> CONFIG_PROVIDER.getOrCreate(null).getPasswordValidatorConfig());
+    public static final PasswordPolicyGuardrail passwordPolicy =
+    new PasswordPolicyGuardrail(() -> CONFIG_PROVIDER.getOrCreate(null).getPasswordPolicyConfig());
+
+    /**
+     * Guardrail on name for CREATE ROLE / USER statements.
+     */
+    public static final RoleNamePolicyGuardrail roleNamePolicy =
+    new RoleNamePolicyGuardrail(() -> CONFIG_PROVIDER.getOrCreate(null).getRoleNamePolicyConfig());
 
     static
     {
@@ -843,6 +876,93 @@ public final class Guardrails implements GuardrailsMBean
         setTablePropertiesIgnored(fromCSV(properties));
     }
 
+    @Override
+    public Set<String> getKeyspacePropertiesWarned()
+    {
+        return DEFAULT_CONFIG.getKeyspacePropertiesWarned();
+    }
+
+    @Override
+    public String getKeyspacePropertiesWarnedCSV()
+    {
+        return toCSV(DEFAULT_CONFIG.getKeyspacePropertiesWarned());
+    }
+
+    public void setKeyspacePropertiesWarned(String... properties)
+    {
+        setKeyspacePropertiesWarned(ImmutableSet.copyOf(properties));
+    }
+
+    @Override
+    public void setKeyspacePropertiesWarned(Set<String> properties)
+    {
+        DEFAULT_CONFIG.setKeyspacePropertiesWarned(properties);
+    }
+
+    @Override
+    public void setKeyspacePropertiesWarnedCSV(String properties)
+    {
+        setKeyspacePropertiesWarned(fromCSV(properties));
+    }
+
+    @Override
+    public Set<String> getKeyspacePropertiesDisallowed()
+    {
+        return DEFAULT_CONFIG.getKeyspacePropertiesDisallowed();
+    }
+
+    @Override
+    public String getKeyspacePropertiesDisallowedCSV()
+    {
+        return toCSV(DEFAULT_CONFIG.getKeyspacePropertiesDisallowed());
+    }
+
+    public void setKeyspacePropertiesDisallowed(String... properties)
+    {
+        setKeyspacePropertiesDisallowed(ImmutableSet.copyOf(properties));
+    }
+
+    @Override
+    public void setKeyspacePropertiesDisallowed(Set<String> properties)
+    {
+        DEFAULT_CONFIG.setKeyspacePropertiesDisallowed(properties);
+    }
+
+    @Override
+    public void setKeyspacePropertiesDisallowedCSV(String properties)
+    {
+        setKeyspacePropertiesDisallowed(fromCSV(properties));
+    }
+
+    @Override
+    public Set<String> getKeyspacePropertiesIgnored()
+    {
+        return DEFAULT_CONFIG.getKeyspacePropertiesIgnored();
+    }
+
+    @Override
+    public String getKeyspacePropertiesIgnoredCSV()
+    {
+        return toCSV(DEFAULT_CONFIG.getKeyspacePropertiesIgnored());
+    }
+
+    public void setKeyspacePropertiesIgnored(String... properties)
+    {
+        setKeyspacePropertiesIgnored(ImmutableSet.copyOf(properties));
+    }
+
+    @Override
+    public void setKeyspacePropertiesIgnored(Set<String> properties)
+    {
+        DEFAULT_CONFIG.setKeyspacePropertiesIgnored(properties);
+    }
+
+    @Override
+    public void setKeyspacePropertiesIgnoredCSV(String properties)
+    {
+        setKeyspacePropertiesIgnored(fromCSV(properties));
+    }
+    
     @Override
     public boolean getUserTimestampsEnabled()
     {
@@ -1408,15 +1528,55 @@ public final class Guardrails implements GuardrailsMBean
     }
 
     @Override
-    public Map<String, Object> getPasswordValidatorConfig()
+    public String getPasswordPolicy()
     {
-        return password.getConfig();
+        try
+        {
+            return JsonUtils.JSON_OBJECT_MAPPER.writeValueAsString(passwordPolicy.getConfig());
+        }
+        catch (Throwable t)
+        {
+            throw new RuntimeException("Unable to serialize password_policy configuration");
+        }
     }
 
     @Override
-    public void reconfigurePasswordValidator(Map<String, Object> config)
+    public String getRoleNamePolicy()
     {
-        password.reconfigure(config);
+        try
+        {
+            return JsonUtils.JSON_OBJECT_MAPPER.writeValueAsString(roleNamePolicy.getConfig());
+        }
+        catch (Throwable t)
+        {
+            throw new RuntimeException("Unable to serialize role_name_policy configuration");
+        }
+    }
+
+    @Override
+    public void setPasswordPolicy(String value)
+    {
+        try
+        {
+            passwordPolicy.reconfigure(JsonUtils.JSON_OBJECT_MAPPER.readValue(value, new TypeReference<>() {}));
+        }
+        catch (Throwable t)
+        {
+            throw new RuntimeException(t);
+        }
+    }
+
+    @Override
+    public void setRoleNamePolicy(String value)
+    {
+        try
+        {
+            roleNamePolicy.reconfigure(JsonUtils.JSON_OBJECT_MAPPER.readValue(value, new TypeReference<>() {}));
+        }
+        catch (Throwable t)
+        {
+            throw new RuntimeException(t);
+        }
     }
 
     @Override
@@ -1448,6 +1608,18 @@ public final class Guardrails implements GuardrailsMBean
     public void setDataDiskUsageMaxDiskSize(@Nullable String size)
     {
         DEFAULT_CONFIG.setDataDiskUsageMaxDiskSize(sizeFromString(size));
+    }
+
+    @Override
+    public boolean getDataDiskUsageKeyspaceWideProtectionEnabled()
+    {
+        return DEFAULT_CONFIG.getDataDiskUsageKeyspaceWideProtectionEnabled();
+    }
+
+    @Override
+    public void setDataDiskUsageKeyspaceWideProtectionEnabled(boolean enabled)
+    {
+        DEFAULT_CONFIG.setDataDiskUsageKeyspaceWideProtectionEnabled(enabled);
     }
 
     @Override

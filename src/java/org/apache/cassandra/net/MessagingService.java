@@ -30,10 +30,10 @@ import java.util.concurrent.TimeoutException;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.Lists;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import io.netty.util.concurrent.Future; //checkstyle: permit this import
 import org.apache.cassandra.concurrent.ScheduledExecutors;
 import org.apache.cassandra.concurrent.Stage;
 import org.apache.cassandra.config.DatabaseDescriptor;
@@ -50,6 +50,8 @@ import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.concurrent.AsyncPromise;
 import org.apache.cassandra.utils.concurrent.FutureCombiner;
 import org.apache.cassandra.utils.concurrent.Promise;
+
+import io.netty.util.concurrent.Future; // checkstyle: permit this import
 
 import static java.util.Collections.synchronizedList;
 import static java.util.concurrent.TimeUnit.MINUTES;
@@ -478,21 +480,28 @@ public class MessagingService extends MessagingServiceMBeanImpl implements Messa
     public <RSP> Future<RSP> sendWithResponse(InetAddressAndPort to, Message<?> msg)
     {
         Promise<RSP> future = AsyncPromise.uncancellable();
-        MessagingService.instance().sendWithCallback(msg, to,
-                                                     new RequestCallback<RSP>()
-                                                     {
-                                                         @Override
-                                                         public void onResponse(Message<RSP> msg)
-                                                         {
-                                                             future.setSuccess(msg.payload);
-                                                         }
+        RequestCallback<RSP> callback = new RequestCallback<RSP>()
+        {
+            @Override
+            public void onResponse(Message<RSP> msg)
+            {
+                future.setSuccess(msg.payload);
+            }
 
-                                                         @Override
-                                                         public void onFailure(InetAddressAndPort from, RequestFailure failure)
-                                                         {
-                                                             future.setFailure(new RuntimeException(failure.toString()));
-                                                         }
-                                                     });
+            @Override
+            public void onFailure(InetAddressAndPort from, RequestFailure failure)
+            {
+                future.setFailure(new RuntimeException(failure.toString()));
+            }
+        };
+        try
+        {
+            MessagingService.instance().sendWithCallback(msg, to, callback);
+        }
+        catch (Throwable e) // catch any exception during sending the message and wrap it inside feture to have unified exception handling
+        {
+            future.setFailure(e);
+        }
 
         return future;
     }

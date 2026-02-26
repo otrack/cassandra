@@ -50,6 +50,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
+
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 import javax.management.ListenerNotFoundException;
@@ -59,7 +60,9 @@ import javax.management.NotificationListener;
 import javax.management.openmbean.CompositeData;
 import javax.management.openmbean.OpenDataException;
 import javax.management.openmbean.TabularData;
+import javax.management.openmbean.TabularDataSupport;
 
+import com.codahale.metrics.Meter;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Joiner;
 import com.google.common.base.Predicate;
@@ -72,13 +75,10 @@ import com.google.common.collect.Ordering;
 import com.google.common.collect.Sets;
 import com.google.common.util.concurrent.Uninterruptibles;
 
-import org.apache.cassandra.io.sstable.format.SSTableReader;
-import org.apache.cassandra.repair.autorepair.AutoRepair;
 import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import com.codahale.metrics.Meter;
 import org.apache.cassandra.audit.AuditLogManager;
 import org.apache.cassandra.audit.AuditLogOptions;
 import org.apache.cassandra.auth.AuthCacheService;
@@ -106,6 +106,8 @@ import org.apache.cassandra.db.SystemKeyspace;
 import org.apache.cassandra.db.commitlog.CommitLog;
 import org.apache.cassandra.db.compaction.CompactionManager;
 import org.apache.cassandra.db.compaction.OperationType;
+import org.apache.cassandra.db.compression.CompressionDictionary.LightweightCompressionDictionary;
+import org.apache.cassandra.db.compression.CompressionDictionaryDetailsTabularData;
 import org.apache.cassandra.db.guardrails.Guardrails;
 import org.apache.cassandra.db.lifecycle.LifecycleTransaction;
 import org.apache.cassandra.dht.BootStrapper;
@@ -134,6 +136,7 @@ import org.apache.cassandra.index.IndexStatusManager;
 import org.apache.cassandra.io.sstable.IScrubber;
 import org.apache.cassandra.io.sstable.IVerifier;
 import org.apache.cassandra.io.sstable.SSTableLoader;
+import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.sstable.format.Version;
 import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.io.util.FileUtils;
@@ -158,7 +161,9 @@ import org.apache.cassandra.metrics.SamplingManager;
 import org.apache.cassandra.metrics.StorageMetrics;
 import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.repair.RepairCoordinator;
+import org.apache.cassandra.repair.RepairParallelism;
 import org.apache.cassandra.repair.SharedContext;
+import org.apache.cassandra.repair.autorepair.AutoRepair;
 import org.apache.cassandra.repair.messages.RepairOption;
 import org.apache.cassandra.schema.CompactionParams.TombstoneOption;
 import org.apache.cassandra.schema.KeyspaceMetadata;
@@ -183,6 +188,7 @@ import org.apache.cassandra.service.paxos.PaxosState;
 import org.apache.cassandra.service.paxos.cleanup.PaxosCleanupLocalCoordinator;
 import org.apache.cassandra.service.paxos.cleanup.PaxosRepairState;
 import org.apache.cassandra.service.snapshot.SnapshotManager;
+import org.apache.cassandra.streaming.PreviewKind;
 import org.apache.cassandra.streaming.StreamManager;
 import org.apache.cassandra.streaming.StreamResultFuture;
 import org.apache.cassandra.streaming.StreamState;
@@ -199,6 +205,7 @@ import org.apache.cassandra.tcm.membership.NodeAddresses;
 import org.apache.cassandra.tcm.membership.NodeId;
 import org.apache.cassandra.tcm.membership.NodeState;
 import org.apache.cassandra.tcm.migration.GossipCMSListener;
+import org.apache.cassandra.tcm.ownership.DataPlacement;
 import org.apache.cassandra.tcm.ownership.MovementMap;
 import org.apache.cassandra.tcm.ownership.TokenMap;
 import org.apache.cassandra.tcm.ownership.VersionedEndpoints;
@@ -206,9 +213,9 @@ import org.apache.cassandra.tcm.sequences.BootstrapAndJoin;
 import org.apache.cassandra.tcm.sequences.BootstrapAndReplace;
 import org.apache.cassandra.tcm.sequences.InProgressSequences;
 import org.apache.cassandra.tcm.sequences.SingleNodeSequences;
+import org.apache.cassandra.tcm.transformations.AlterTopology;
 import org.apache.cassandra.tcm.transformations.Assassinate;
 import org.apache.cassandra.tcm.transformations.CancelInProgressSequence;
-import org.apache.cassandra.tcm.transformations.AlterTopology;
 import org.apache.cassandra.tcm.transformations.Register;
 import org.apache.cassandra.tcm.transformations.Startup;
 import org.apache.cassandra.tcm.transformations.Unregister;
@@ -845,7 +852,10 @@ public class StorageService extends NotificationBroadcasterSupport implements IE
         Gossiper.waitToSettle();
 
         NodeId self = Register.maybeRegister();
-        AccordService.startup(self);
+        if (!AccordService.isSetupOrStarting())
+            AccordService.localStartup(self);
+        AccordService.distributedStartup();
+
         RegistrationStatus.instance.onRegistration();
         Startup.maybeExecuteStartupTransformation(self);
 
@@ -2069,9 +2079,10 @@ public class StorageService extends NotificationBroadcasterSupport implements IE
         {
             if (keyspaceMetadata.params.replication.isMeta())
             {
-                rangeToEndpointMap.put(MetaStrategy.entireRange,
-                                       metadata.placements.get(keyspaceMetadata.params.replication)
-                                       .reads.forRange(MetaStrategy.entireRange).get());
+                DataPlacement placement = metadata.placements.get(keyspaceMetadata.params.replication);
+                // May be empty if mid-upgrade and CMS is not yet initialized
+                if (!placement.reads.isEmpty())
+                    rangeToEndpointMap.put(MetaStrategy.entireRange, placement.reads.forRange(MetaStrategy.entireRange).get());
             }
             else
             {
@@ -2152,6 +2163,12 @@ public class StorageService extends NotificationBroadcasterSupport implements IE
                     Gossiper.instance.markDead(endpoint, epState);
                 });
             }
+            else if (Gossiper.isLeft(value))
+            {
+                long expireTime = Gossiper.extractExpireTime(value.splitValue());
+                logger.info("Node state LEFT detected, setting or updating expire time {}", expireTime);
+                Gossiper.instance.addExpireTimeForEndpoint(endpoint, expireTime);
+            }
         }
 
         if (epState == null || Gossiper.instance.isDeadState(epState))
@@ -2201,7 +2218,7 @@ public class StorageService extends NotificationBroadcasterSupport implements IE
                     updateNetVersion(endpoint, value);
                     break;
                 case STATUS_WITH_PORT:
-                    String[] pieces = splitValue(value);
+                    String[] pieces = value.splitValue();
                     String moveName = pieces[0];
                     if (moveName.equals(VersionedValue.SHUTDOWN))
                         logger.info("Node {} state jump to shutdown", endpoint);
@@ -2218,11 +2235,6 @@ public class StorageService extends NotificationBroadcasterSupport implements IE
             logger.debug("Ignoring application state {} from {} because it is not a member in token metadata",
                          state, endpoint);
         }
-    }
-
-    private static String[] splitValue(VersionedValue value)
-    {
-        return value.value.split(VersionedValue.DELIMITER_STR, -1);
     }
 
     public static void updateIndexStatus(InetAddressAndPort endpoint, VersionedValue versionedValue)
@@ -2684,10 +2696,18 @@ public class StorageService extends NotificationBroadcasterSupport implements IE
     @Deprecated(since = "4.0")
     public int verify(boolean extendedVerify, String keyspaceName, String... tableNames) throws IOException, ExecutionException, InterruptedException
     {
-        return verify(extendedVerify, false, false, false, false, false, keyspaceName, tableNames);
+        return verify(extendedVerify, false, false, false, false, false, false, false, keyspaceName, tableNames);
     }
 
+    /**
+     * Kept for backward compatibility with existing clients.
+     */
     public int verify(boolean extendedVerify, boolean checkVersion, boolean diskFailurePolicy, boolean mutateRepairStatus, boolean checkOwnsTokens, boolean quick, String keyspaceName, String... tableNames) throws IOException, ExecutionException, InterruptedException
+    {
+        return verify(extendedVerify, checkVersion, diskFailurePolicy, mutateRepairStatus, checkOwnsTokens, quick, false, false, keyspaceName, tableNames);
+    }
+
+    public int verify(boolean extendedVerify, boolean checkVersion, boolean diskFailurePolicy, boolean mutateRepairStatus, boolean checkOwnsTokens, boolean quick, boolean onlySai, boolean includeSai, String keyspaceName, String... tableNames) throws IOException, ExecutionException, InterruptedException
     {
         CompactionManager.AllSSTableOpStatus status = CompactionManager.AllSSTableOpStatus.SUCCESSFUL;
         IVerifier.Options options = IVerifier.options().invokeDiskFailurePolicy(diskFailurePolicy)
@@ -2695,7 +2715,9 @@ public class StorageService extends NotificationBroadcasterSupport implements IE
                                              .checkVersion(checkVersion)
                                              .mutateRepairStatus(mutateRepairStatus)
                                              .checkOwnsTokens(checkOwnsTokens)
-                                             .quick(quick).build();
+                                             .quick(quick)
+                                             .onlySai(onlySai)
+                                             .includeSai(includeSai).build();
         logger.info("Staring {} on {}.{} with options = {}", OperationType.VERIFY, keyspaceName, Arrays.toString(tableNames), options);
         for (ColumnFamilyStore cfStore : getValidColumnFamilies(false, false, keyspaceName, tableNames))
         {
@@ -3143,6 +3165,30 @@ public class StorageService extends NotificationBroadcasterSupport implements IE
         if (options.isTraced())
             return new FutureTaskWithResources<>(() -> ExecutorLocals::clear, task);
         return new FutureTask<>(task);
+    }
+
+    public RepairCoordinator repairAccordKeyspace(String keyspace, Collection<Range<Token>> ranges)
+    {
+        int cmd = nextRepairCommand.incrementAndGet();
+        RepairOption options = new RepairOption(RepairParallelism.PARALLEL, // parallelism
+                                                false,                       // primaryRange
+                                                false,                      // incremental
+                                                false,                      // trace
+                                                5,                          // jobThreads
+                                                ranges,                     // ranges
+                                                true,                       // pullRepair
+                                                true,                       // forceRepair
+                                                PreviewKind.NONE,           // previewKind
+                                                false,                      // optimiseStreams
+                                                true,                       // ignoreUnreplicatedKeyspaces
+                                                true,                       // repairData
+                                                false,                      // repairPaxos
+                                                true,                       // dontPurgeTombstones
+                                                false,                      // repairAccord
+                                                false                       // permit no quorum
+        );
+
+        return new RepairCoordinator(this, cmd, options, keyspace);
     }
 
     private void tryRepairPaxosForTopologyChange(String reason)
@@ -3820,8 +3866,8 @@ public class StorageService extends NotificationBroadcasterSupport implements IE
                 transientMode = Optional.of(Mode.DRAINING);
             }
 
-            if (AccordService.isSetup())
-                AccordService.instance().markShuttingDown();
+            if (AccordService.isSetupOrStarting())
+                AccordService.unsafeInstance().markShuttingDown();
 
             // In-progress writes originating here could generate hints to be written,
             // which is currently scheduled on the mutation stage. So shut down MessagingService
@@ -3837,14 +3883,14 @@ public class StorageService extends NotificationBroadcasterSupport implements IE
                 logger.error("Messaging service timed out shutting down", t);
             }
 
-            if (AccordService.isSetup())
+            if (AccordService.isSetupOrStarting())
             {
                 logger.info("Flushing Accord caches");
-                if (!AccordService.instance().flushCaches().awaitUninterruptibly(1, MINUTES))
+                if (!AccordService.unsafeInstance().flushCaches().awaitUninterruptibly(1, MINUTES))
                     logger.error("Could not flush Accord caches promptly");
                 if (AccordColumnFamilyStores.commandsForKey != null)
                     AccordColumnFamilyStores.commandsForKey.forceBlockingFlush(INTERNALLY_FORCED);
-                AccordService.instance().shutdownAndWait(1, MINUTES);
+                AccordService.unsafeInstance().shutdownAndWait(1, MINUTES);
             }
 
             // ScheduledExecutors shuts down after MessagingService, as MessagingService may issue tasks to it.
@@ -3934,6 +3980,17 @@ public class StorageService extends NotificationBroadcasterSupport implements IE
 
             if (isFinalShutdown)
                 DiskErrorsHandlerService.get().close();
+
+            try
+            {
+                // stop async profiler on shutdown in case a user
+                // did not stop it beforehand on their own
+                AsyncProfilerService.instance().stop(Map.of());
+            }
+            catch (Throwable t)
+            {
+                logger.error("Failed to stop async profiler.", t);
+            }
 
             try
             {
@@ -4677,6 +4734,17 @@ public class StorageService extends NotificationBroadcasterSupport implements IE
     public void setInvalidateKeycacheOnSSTableDeletion(boolean invalidate)
     {
         DatabaseDescriptor.setInvalidateKeycacheOnSSTableDeletion(invalidate);
+    }
+
+    public int getSSTablesPerReadLogThreshold()
+    {
+        return DatabaseDescriptor.getSSTablesPerReadLogThreshold();
+    }
+
+    public void setSSTablesPerReadLogThreshold(int threshold)
+    {
+        DatabaseDescriptor.setSSTablesPerReadLogThreshold(threshold);
+        logger.info("updated sstables_per_read_log_threshold to {}", threshold);
     }
 
     public int getTombstoneWarnThreshold()
@@ -5651,6 +5719,18 @@ public class StorageService extends NotificationBroadcasterSupport implements IE
     }
 
     @Override
+    public boolean getForceOptimizedIndexStatusFormat()
+    {
+        return DatabaseDescriptor.getForceOptimizedIndexStatusFormat();
+    }
+
+    @Override
+    public void setForceOptimizedIndexStatusFormat(boolean value)
+    {
+        DatabaseDescriptor.setForceOptimizedIndexStatusFormat(value);
+    }
+
+    @Override
     public void setPaxosRepairRaceWait(boolean paxosRepairRaceWait)
     {
         DatabaseDescriptor.setPaxosRepairRaceWait(paxosRepairRaceWait);
@@ -5716,5 +5796,26 @@ public class StorageService extends NotificationBroadcasterSupport implements IE
             sstablesTouched.addAll(result.stream().map(sst -> sst.descriptor.baseFile().name()).collect(Collectors.toList()));
         }
         return sstablesTouched;
+    }
+
+    @Override
+    public TabularData getOrphanedCompressionDictionaries()
+    {
+        List<LightweightCompressionDictionary> dicts = SystemDistributedKeyspace.retrieveOrphanedLightweightCompressionDictionaries();
+        TabularDataSupport tabularData = new TabularDataSupport(CompressionDictionaryDetailsTabularData.TABULAR_TYPE);
+
+        if (dicts.isEmpty())
+            return tabularData;
+
+        for (LightweightCompressionDictionary dict : dicts)
+            tabularData.put(CompressionDictionaryDetailsTabularData.fromLightweightCompressionDictionary(dict));
+
+        return tabularData;
+    }
+
+    @Override
+    public void clearOrphanedCompressionDictionaries()
+    {
+        SystemDistributedKeyspace.clearOrphanedCompressionDictionaries();
     }
 }

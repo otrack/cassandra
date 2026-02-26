@@ -30,6 +30,7 @@ import java.util.stream.Collectors;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterators;
+
 import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
@@ -59,6 +60,7 @@ import accord.primitives.Status;
 import accord.primitives.Txn;
 import accord.primitives.Txn.Kind;
 import accord.primitives.TxnId;
+
 import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.config.CassandraRelevantProperties;
 import org.apache.cassandra.cql3.QueryProcessor;
@@ -97,8 +99,8 @@ import static accord.primitives.Timestamp.Flag.SHARD_BOUND;
 import static org.apache.cassandra.Util.spinAssertEquals;
 import static org.apache.cassandra.cql3.statements.schema.CreateTableStatement.parse;
 import static org.apache.cassandra.schema.SchemaConstants.ACCORD_KEYSPACE_NAME;
-import static org.apache.cassandra.service.accord.AccordKeyspace.COMMANDS_FOR_KEY;
 import static org.apache.cassandra.service.accord.AccordKeyspace.CFKAccessor;
+import static org.apache.cassandra.service.accord.AccordKeyspace.COMMANDS_FOR_KEY;
 import static org.apache.cassandra.service.accord.AccordService.getBlocking;
 import static org.junit.Assert.assertEquals;
 import static org.mockito.Mockito.mock;
@@ -279,10 +281,14 @@ public class CompactionAccordIteratorsTest
 
     private static void flush(AccordCommandStore commandStore)
     {
+        long cacheSize;
         try (AccordExecutor.ExclusiveGlobalCaches cache = commandStore.executor().lockCaches();)
         {
-            long cacheSize = cache.global.capacity();
+            cacheSize = cache.global.capacity();
             cache.global.setCapacity(0);
+        }
+        try (AccordExecutor.ExclusiveGlobalCaches cache = commandStore.executor().lockCaches();)
+        {
             cache.global.setCapacity(cacheSize);
         }
         commandsForKey.forceBlockingFlush(FlushReason.UNIT_TESTS);
@@ -313,7 +319,7 @@ public class CompactionAccordIteratorsTest
             Txn txn = txnId.kind().isWrite() ? writeTxn : readTxn;
             PartialDeps partialDeps = Deps.NONE.intersecting(AccordTestUtils.fullRange(txn));
             PartialTxn partialTxn = txn.slice(commandStore.unsafeGetRangesForEpoch().currentRanges(), true);
-            Route<?> partialRoute = route.slice(commandStore.unsafeGetRangesForEpoch().currentRanges());
+            Route<?> partialRoute = route.overlapping(commandStore.unsafeGetRangesForEpoch().currentRanges());
             getBlocking(commandStore.execute(contextFor(txnId, route, SYNC, READ_WRITE, "Test"), safe -> {
                 CheckedCommands.preaccept(safe, txnId, partialTxn, route, (a, b) -> {});
             }));

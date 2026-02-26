@@ -21,6 +21,7 @@ import java.io.IOException;
 
 import accord.messages.GetDurableBefore;
 import accord.messages.GetDurableBefore.DurableBeforeReply;
+
 import org.apache.cassandra.io.UnversionedSerializer;
 import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputPlus;
@@ -52,7 +53,7 @@ public class GetDurableBeforeSerializers
         @Override
         public void serialize(DurableBeforeReply msg, DataOutputPlus out) throws IOException
         {
-            CommandStoreSerializers.durableBefore.serialize(msg.durableBeforeMap, out);
+            CommandStoreSerializers.durableBefore.serialize(msg.durableBefore, out);
         }
 
         @Override
@@ -64,7 +65,7 @@ public class GetDurableBeforeSerializers
         @Override
         public long serializedSize(DurableBeforeReply msg)
         {
-            return CommandStoreSerializers.durableBefore.serializedSize(msg.durableBeforeMap);
+            return CommandStoreSerializers.durableBefore.serializedSize(msg.durableBefore);
         }
     };
 }

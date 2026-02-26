@@ -21,12 +21,15 @@ package org.apache.cassandra.tcm.sequences;
 import java.util.TreeSet;
 import java.util.stream.Stream;
 
+import org.assertj.core.api.Assertions;
 import org.junit.Test;
+import org.quicktheories.generators.SourceDSL;
 
 import accord.utils.Gen;
 import accord.utils.Property;
 import accord.utils.Property.Command;
 import accord.utils.RandomSource;
+
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.dht.Murmur3Partitioner;
 import org.apache.cassandra.locator.MetaStrategy;
@@ -37,21 +40,21 @@ import org.apache.cassandra.schema.Keyspaces;
 import org.apache.cassandra.schema.TableId;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.schema.Types;
+import org.apache.cassandra.service.accord.AccordService;
+import org.apache.cassandra.service.accord.IAccordService;
 import org.apache.cassandra.service.consensus.TransactionalMode;
 import org.apache.cassandra.tcm.ClusterMetadata;
 import org.apache.cassandra.tcm.ClusterMetadataService;
 import org.apache.cassandra.tcm.MultiStepOperation;
 import org.apache.cassandra.tcm.StubClusterMetadataService;
 import org.apache.cassandra.tcm.ValidatingClusterMetadataService;
+import org.apache.cassandra.tcm.sequences.DropAccordTable.TableReference;
 import org.apache.cassandra.tcm.serialization.Version;
 import org.apache.cassandra.tcm.transformations.PrepareDropAccordTable;
-import org.apache.cassandra.tcm.sequences.DropAccordTable.TableReference;
 import org.apache.cassandra.utils.AbstractTypeGenerators;
 import org.apache.cassandra.utils.CassandraGenerators;
 import org.apache.cassandra.utils.CassandraGenerators.TableMetadataBuilder;
 import org.apache.cassandra.utils.Generators;
-import org.assertj.core.api.Assertions;
-import org.quicktheories.generators.SourceDSL;
 
 import static accord.utils.Property.commands;
 import static accord.utils.Property.qt;
@@ -62,7 +65,9 @@ public class DropAccordTableTest
 {
     static
     {
-        DatabaseDescriptor.clientInitialization();
+        DatabaseDescriptor.daemonInitialization();
+        // TODO (required): should this be a no-op service? Probably not! But this is what it was before (only relying on !accord.enabled check in AccordService.instance()...)
+        AccordService.unsafeSetNewAccordService(new IAccordService.NoOpAccordService());
     }
 
     private static final TransactionalMode[] ACCORD_ENABLED_MODES = Stream.of(TransactionalMode.values())

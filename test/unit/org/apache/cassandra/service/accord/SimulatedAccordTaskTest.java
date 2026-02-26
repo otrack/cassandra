@@ -26,6 +26,7 @@ import java.util.function.BooleanSupplier;
 import java.util.function.LongSupplier;
 import java.util.function.Supplier;
 
+import org.assertj.core.api.Assertions;
 import org.junit.Before;
 import org.junit.Test;
 
@@ -44,6 +45,7 @@ import accord.primitives.Unseekables;
 import accord.utils.Gen;
 import accord.utils.Gens;
 import accord.utils.RandomSource;
+
 import org.apache.cassandra.dht.Murmur3Partitioner;
 import org.apache.cassandra.dht.Murmur3Partitioner.LongToken;
 import org.apache.cassandra.schema.TableId;
@@ -51,7 +53,6 @@ import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.service.accord.SimulatedAccordCommandStore.FunctionWrapper;
 import org.apache.cassandra.service.accord.api.TokenKey;
 import org.apache.cassandra.utils.Pair;
-import org.assertj.core.api.Assertions;
 
 import static accord.utils.Property.qt;
 
@@ -120,9 +121,9 @@ public class SimulatedAccordTaskTest extends SimulatedAccordCommandStoreTestBase
                         FullRoute<?> route = txnWithRoute.right;
                         PreAccept preAccept = new PreAccept(nodeId, instance.topologies, txnId, txn, null, false, route) {
                             @Override
-                            public PreAcceptReply apply(SafeCommandStore safeStore)
+                            public PreAcceptReply applyInternal(SafeCommandStore safeStore)
                             {
-                                PreAcceptReply result = super.apply(safeStore);
+                                PreAcceptReply result = super.applyInternal(safeStore);
                                 if (action == Action.FAILURE)
                                     throw new SimulatedFault("PreAccept failed for keys " + keys());
                                 return result;

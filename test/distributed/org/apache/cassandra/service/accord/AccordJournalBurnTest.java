@@ -30,6 +30,7 @@ import java.util.Set;
 import java.util.TreeMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
+
 import javax.annotation.Nullable;
 
 import org.junit.Before;
@@ -53,6 +54,7 @@ import accord.utils.DefaultRandom;
 import accord.utils.Invariants;
 import accord.utils.PersistentField;
 import accord.utils.RandomSource;
+
 import org.apache.cassandra.ServerTestUtils;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.Directories;
@@ -304,7 +306,7 @@ public class AccordJournalBurnTest extends BurnTestBase
                                          while (ci.hasNext())
                                              writer.append(ci.next());
 
-                                         ci.setTargetDirectory(writer.getSStableDirectory().path());
+                                         ci.setTargetDirectory(writer.getSStableDirectoryPath());
                                          // point of no return
                                          newSStables = writer.finish();
                                      }
@@ -332,7 +334,7 @@ public class AccordJournalBurnTest extends BurnTestBase
                              private TreeMap<JournalKey, Command> read(CommandStores commandStores)
                              {
                                  TreeMap<JournalKey, Command> result = new TreeMap<>(JournalKey.SUPPORT::compare);
-                                 try (CloseableIterator<Journal.KeyRefs<JournalKey>> iter = journalTable.keyIterator(null, null))
+                                 try (CloseableIterator<Journal.KeyRefs<JournalKey>> iter = journalTable.keyIterator(null, null, false))
                                  {
                                      JournalKey prev = null;
                                      while (iter.hasNext())
@@ -354,11 +356,11 @@ public class AccordJournalBurnTest extends BurnTestBase
                              }
 
                              @Override
-                             public void replay(CommandStores commandStores)
+                             public boolean replay(CommandStores commandStores)
                              {
                                  // Make sure to replay _only_ static segments
                                  this.closeCurrentSegmentForTestingIfNonEmpty();
-                                 super.replay(commandStores);
+                                 return super.replay(commandStores);
                              }
 
                              @Override
@@ -388,7 +390,7 @@ public class AccordJournalBurnTest extends BurnTestBase
     public static IAccordService.AccordCompactionInfos getCompactionInfo(Node node, TableId tableId)
     {
         IAccordService.AccordCompactionInfos compactionInfos = new IAccordService.AccordCompactionInfos(node.durableBefore(), node.topology().minEpoch());
-        node.commandStores().forEachCommandStore(commandStore -> {
+        node.commandStores().forAllUnsafe(commandStore -> {
             RedundantBefore redundantBefore = commandStore.unsafeGetRedundantBefore();
             if (redundantBefore == null)
                 redundantBefore = RedundantBefore.EMPTY;

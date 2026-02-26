@@ -26,25 +26,31 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Predicate;
 import java.util.stream.Stream;
+
 import javax.management.StandardMBean;
 import javax.management.remote.JMXConnectorServer;
-
-import com.google.common.annotations.VisibleForTesting;
-import com.google.common.collect.ImmutableList;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import com.codahale.metrics.Meter;
 import com.codahale.metrics.MetricRegistryListener;
 import com.codahale.metrics.SharedMetricRegistries;
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.collect.ImmutableList;
+
+import org.apache.commons.lang3.StringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import org.apache.cassandra.audit.AuditLogManager;
 import org.apache.cassandra.auth.AuthCacheService;
 import org.apache.cassandra.auth.AuthenticatedUser;
@@ -60,6 +66,7 @@ import org.apache.cassandra.db.SystemKeyspace;
 import org.apache.cassandra.db.SystemKeyspaceMigrator41;
 import org.apache.cassandra.db.commitlog.CommitLog;
 import org.apache.cassandra.db.virtual.AccordDebugKeyspace;
+import org.apache.cassandra.db.virtual.AccordDebugRemoteKeyspace;
 import org.apache.cassandra.db.virtual.ExceptionsTable;
 import org.apache.cassandra.db.virtual.LogMessagesTable;
 import org.apache.cassandra.db.virtual.SlowQueriesTable;
@@ -73,10 +80,6 @@ import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.locator.Locator;
-import org.apache.cassandra.tcm.CMSOperations;
-import org.apache.cassandra.tcm.ClusterMetadataService;
-import org.apache.cassandra.tcm.RegistrationStatus;
-import org.apache.cassandra.tcm.Startup;
 import org.apache.cassandra.metrics.CassandraMetricsRegistry;
 import org.apache.cassandra.metrics.DefaultNameFactory;
 import org.apache.cassandra.net.StartupClusterConnectivityChecker;
@@ -84,11 +87,18 @@ import org.apache.cassandra.schema.Schema;
 import org.apache.cassandra.schema.SchemaConstants;
 import org.apache.cassandra.security.ThreadAwareSecurityManager;
 import org.apache.cassandra.service.accord.AccordOperations;
+import org.apache.cassandra.service.accord.AccordService;
 import org.apache.cassandra.service.paxos.PaxosState;
 import org.apache.cassandra.service.snapshot.SnapshotManager;
 import org.apache.cassandra.streaming.StreamManager;
+import org.apache.cassandra.tcm.CMSOperations;
 import org.apache.cassandra.tcm.ClusterMetadata;
+import org.apache.cassandra.tcm.ClusterMetadataService;
 import org.apache.cassandra.tcm.MultiStepOperation;
+import org.apache.cassandra.tcm.RegistrationStatus;
+import org.apache.cassandra.tcm.Startup;
+import org.apache.cassandra.tcm.membership.NodeId;
+import org.apache.cassandra.tcm.membership.NodeState;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.JMXServerUtils;
 import org.apache.cassandra.utils.JVMStabilityInspector;
@@ -110,6 +120,8 @@ import static org.apache.cassandra.config.CassandraRelevantProperties.JAVA_CLASS
 import static org.apache.cassandra.config.CassandraRelevantProperties.JAVA_RMI_SERVER_RANDOM_ID;
 import static org.apache.cassandra.config.CassandraRelevantProperties.JAVA_VERSION;
 import static org.apache.cassandra.config.CassandraRelevantProperties.JAVA_VM_NAME;
+import static org.apache.cassandra.config.CassandraRelevantProperties.OVERRIDE_COMPACTION_ENTITIES;
+import static org.apache.cassandra.config.CassandraRelevantProperties.OVERRIDE_COMPACTION_PARAMS;
 import static org.apache.cassandra.config.CassandraRelevantProperties.SIZE_RECORDER_INTERVAL;
 import static org.apache.cassandra.config.CassandraRelevantProperties.START_NATIVE_TRANSPORT;
 import static org.apache.cassandra.metrics.CassandraMetricsRegistry.createMetricsKeyspaceTables;
@@ -190,8 +202,8 @@ public class CassandraDaemon
     }
 
     @VisibleForTesting
-    public static Runnable SPECULATION_THRESHOLD_UPDATER = 
-        () -> 
+    public static Runnable SPECULATION_THRESHOLD_UPDATER =
+        () ->
         {
             try
             {
@@ -203,14 +215,13 @@ public class CassandraDaemon
                 JVMStabilityInspector.inspectThrowable(t);
             }
         };
-    
+
     static final CassandraDaemon instance = new CassandraDaemon();
 
     private volatile NativeTransportService nativeTransportService;
     private JMXConnectorServer jmxServer;
 
     private final boolean runManaged;
-    protected final StartupChecks startupChecks;
     private boolean setupCompleted;
 
     public CassandraDaemon()
@@ -221,7 +232,6 @@ public class CassandraDaemon
     public CassandraDaemon(boolean runManaged)
     {
         this.runManaged = runManaged;
-        this.startupChecks = new StartupChecks().withDefaultTests().withTest(new FileSystemOwnershipCheck());
         this.setupCompleted = false;
     }
 
@@ -257,6 +267,8 @@ public class CassandraDaemon
 
         NativeLibrary.tryMlockall();
 
+        AsyncProfilerService.instance();
+
         Keyspace.setInitialized();
         CommitLog.instance.start();
 
@@ -277,7 +289,12 @@ public class CassandraDaemon
             disableAutoCompaction(Schema.instance.distributedKeyspaces().names());
             CMSOperations.initJmx();
             AccordOperations.initJmx();
-            if (ClusterMetadata.current().myNodeId() != null)
+            NodeState nodeStateForLocalAddress = ClusterMetadata.current().myNodeState();
+            // If another node with the same address was previously a member and was decommissioned, it can be
+            // present in ClusterMetadata with a LEFT state. That should not trigger _this_ node to update
+            // RegistrationStatus. During the startup process the old node will be expunged and this node
+            // will register, prompting another call to onRegistration.
+            if (nodeStateForLocalAddress != null && nodeStateForLocalAddress != NodeState.LEFT)
                 RegistrationStatus.instance.onRegistration();
         }
         catch (InterruptedException | ExecutionException | IOException e)
@@ -336,11 +353,12 @@ public class CassandraDaemon
         PaxosState.initializeTrackers();
 
         // replay the log if necessary
-        // TODO samt - when restarting a previously running instance, this needs to happen after reconstructing schema
-        //  from the cluster metadata log or all mutations will throw IncompatibleSchemaException on deserialisation
         try
         {
             CommitLog.instance.recoverSegmentsOnDisk();
+            NodeId self = ClusterMetadata.current().myNodeId();
+            if (self != null)
+                AccordService.localStartup(self);
         }
         catch (IOException e)
         {
@@ -403,6 +421,8 @@ public class CassandraDaemon
         ScheduledExecutors.optionalTasks.schedule(viewRebuild, StorageService.RING_DELAY_MILLIS, TimeUnit.MILLISECONDS);
         StorageService.instance.doAuthSetup();
 
+        // Apply overrides before re-enabling auto-compaction
+        setCompactionStrategyOverrides(Schema.instance.getKeyspaces());
         // re-enable auto-compaction after replay, so correct disk boundaries are used
         enableAutoCompaction(Schema.instance.getKeyspaces());
 
@@ -415,7 +435,7 @@ public class CassandraDaemon
         ScheduledExecutors.optionalTasks.scheduleWithFixedDelay(ColumnFamilyStore.getBackgroundCompactionTaskSubmitter(), 5, 1, TimeUnit.MINUTES);
 
         // schedule periodic recomputation of speculative retry thresholds
-        ScheduledExecutors.optionalTasks.scheduleWithFixedDelay(SPECULATION_THRESHOLD_UPDATER, 
+        ScheduledExecutors.optionalTasks.scheduleWithFixedDelay(SPECULATION_THRESHOLD_UPDATER,
                                                                 DatabaseDescriptor.getReadRpcTimeout(NANOSECONDS),
                                                                 DatabaseDescriptor.getReadRpcTimeout(NANOSECONDS),
                                                                 NANOSECONDS);
@@ -437,7 +457,7 @@ public class CassandraDaemon
     {
         try
         {
-            startupChecks.verify(DatabaseDescriptor.getStartupChecksOptions());
+            DatabaseDescriptor.getStartupChecksConfiguration().verify();
         }
         catch (StartupException e)
         {
@@ -552,6 +572,68 @@ public class CassandraDaemon
         }
     }
 
+    public static void setCompactionStrategyOverrides(Collection<String> keyspaces)
+    {
+        if (StringUtils.isBlank(OVERRIDE_COMPACTION_ENTITIES.getString()) || StringUtils.isBlank(OVERRIDE_COMPACTION_PARAMS.getString()))
+        {
+            return;
+        }
+
+        Map<String, List<String>> entitiesToChangeCompaction = parseEntititesToOverrideCompaction();
+        logger.info("Compaction strategy override is enabled via 'cassandra.override_compaction.params' for the following 'cassandra.override_compaction.entities': {}",
+                    entitiesToChangeCompaction);
+        String overrideParams = OVERRIDE_COMPACTION_PARAMS.getString();
+
+        for (String ksNme : keyspaces)
+        {
+            Keyspace keyspace = Keyspace.open(ksNme);
+            for (ColumnFamilyStore cfs : keyspace.getColumnFamilyStores())
+            {
+                for (final ColumnFamilyStore store : cfs.concatWithIndexes())
+                {
+                    List<String> tablesToOverrideCompaction = entitiesToChangeCompaction.get(ksNme);
+                    if (tablesToOverrideCompaction != null && (tablesToOverrideCompaction.isEmpty() || tablesToOverrideCompaction.contains(store.name)))
+                    {
+                        logger.info("Overriding compaction parameters for {}.{} with {}", store.getKeyspaceName(), store.name, overrideParams);
+                        cfs.setCompactionParametersJson(overrideParams);
+                    }
+                }
+            }
+        }
+    }
+
+    @VisibleForTesting
+    static Map<String, List<String>> parseEntititesToOverrideCompaction()
+    {
+        String entitiesCsv = OVERRIDE_COMPACTION_ENTITIES.getString();
+        if (StringUtils.isBlank(entitiesCsv))
+            return Collections.emptyMap();
+
+        // entititesCSV can be like "ks1,ks2,k3.tbl3,ks4.tbl1"
+        Map<String, List<String>> entitiesToChangeCompaction = new HashMap<>();
+        for (String entity : entitiesCsv.split(","))
+        {
+            String[] ksTable = entity.split("\\.");
+            String keyspace = ksTable[0].trim();
+            if (ksTable.length == 1)
+            {
+                entitiesToChangeCompaction.put(keyspace, new java.util.ArrayList<>());
+            }
+            else if (ksTable.length == 2)
+            {
+                // Empty list for a keyspace means all tables in that keyspace should be changed, so if we already have an entry for the keyspace with an empty list,
+                // we can skip adding specific tables for that keyspace as they are redundant.
+                List<String> existing = entitiesToChangeCompaction.get(keyspace);
+                if (existing == null || !existing.isEmpty())
+                {
+                    String table = ksTable[1].trim();
+                    entitiesToChangeCompaction.computeIfAbsent(keyspace, k -> new java.util.ArrayList<>()).add(table);
+                }
+            }
+        }
+        return entitiesToChangeCompaction;
+    }
+
     public void setupVirtualKeyspaces()
     {
         VirtualKeyspaceRegistry.instance.register(VirtualSchemaKeyspace.instance);
@@ -559,7 +641,10 @@ public class CassandraDaemon
         VirtualKeyspaceRegistry.instance.register(new VirtualKeyspace(VIRTUAL_METRICS, createMetricsKeyspaceTables()));
 
         if (DatabaseDescriptor.getAccord().enable_virtual_debug_only_keyspace)
+        {
             VirtualKeyspaceRegistry.instance.register(AccordDebugKeyspace.instance);
+            VirtualKeyspaceRegistry.instance.register(AccordDebugRemoteKeyspace.instance);
+        }
 
         // Flush log messages to system_views.system_logs virtual table as there were messages already logged
         // before that virtual table was instantiated.

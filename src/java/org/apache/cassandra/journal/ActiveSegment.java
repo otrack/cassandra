@@ -27,14 +27,17 @@ import java.util.concurrent.atomic.AtomicLongFieldUpdater;
 import java.util.concurrent.locks.LockSupport;
 import java.util.function.Consumer;
 
-import accord.utils.Invariants;
 import com.codahale.metrics.Timer;
 import com.google.common.annotations.VisibleForTesting;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import accord.utils.Invariants;
+
 import org.apache.cassandra.db.TypeSizes;
-import org.apache.cassandra.utils.*;
+import org.apache.cassandra.utils.Simulate;
+import org.apache.cassandra.utils.SyncUtil;
 import org.apache.cassandra.utils.concurrent.OpOrder;
 import org.apache.cassandra.utils.concurrent.Ref;
 import org.apache.cassandra.utils.concurrent.WaitQueue;
@@ -466,7 +469,7 @@ public final class ActiveSegment<K, V> extends Segment<K, V>
             }
         }
 
-        // TODO (required): Find a better way to test unwritten allocations and/or corruption
+        // TODO (expected): Find a better way to test unwritten allocations and/or corruption
         @VisibleForTesting
         void consumeBufferUnsafe(Consumer<ByteBuffer> fn)
         {

@@ -32,6 +32,7 @@ import javax.annotation.Nullable;
 import accord.local.MaxDecidedRX.DecidedRX;
 import accord.primitives.Timestamp;
 import accord.primitives.TxnId;
+
 import org.apache.cassandra.index.accord.CheckpointIntervalArrayIndex.SegmentSearcher;
 import org.apache.cassandra.index.accord.IndexDescriptor.IndexComponent;
 import org.apache.cassandra.io.FSReadError;
@@ -75,7 +76,7 @@ public class SSTableIndex extends SharedCloseableImpl
     {
         Map<IndexComponent, FileHandle> files = new EnumMap<>(IndexComponent.class);
         for (IndexComponent c : id.getLiveComponents())
-            files.put(c, new FileHandle.Builder(id.fileFor(c)).mmapped(true).complete());
+            files.put(c, new FileHandle.Builder(id.fileFor(c)).mmapped().complete());
         List<Segment> segments = RouteIndexFormat.readSegments(files);
         files.remove(IndexComponent.SEGMENT).close();
         files.remove(IndexComponent.METADATA).close();

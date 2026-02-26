@@ -18,8 +18,8 @@
 
 package org.apache.cassandra.db.guardrails;
 
-import java.util.Map;
 import java.util.Set;
+
 import javax.annotation.Nullable;
 
 /**
@@ -194,6 +194,66 @@ public interface GuardrailsMBean
      * @param properties Comma-separated list of properties that are ignored when creating or altering a table.
      */
     void setTablePropertiesIgnoredCSV(String properties);
+
+    /**
+     * @return properties that are warned about when creating or altering a keyspace.
+     */
+    Set<String> getKeyspacePropertiesWarned();
+
+    /**
+     * @return Comma-separated list of properties that are warned about when creating or altering a keyspace.
+     */
+    String getKeyspacePropertiesWarnedCSV();
+
+    /**
+     * @param properties properties that are warned about when creating or altering a keyspace.
+     */
+    void setKeyspacePropertiesWarned(Set<String> properties);
+
+    /**
+     * @param properties Comma-separated list of properties that are warned about when creating or altering a keyspace.
+     */
+    void setKeyspacePropertiesWarnedCSV(String properties);
+
+    /**
+     * @return properties that are not allowed when creating or altering a keyspace.
+     */    
+    Set<String> getKeyspacePropertiesDisallowed();
+    
+    /**
+     * @return Comma-separated list of properties that are not allowed when creating or altering a keyspace.
+     */
+    String getKeyspacePropertiesDisallowedCSV();
+
+    /**
+     * @param properties properties that are not allowed when creating or altering a keyspace.
+     */
+    void setKeyspacePropertiesDisallowed(Set<String> properties);
+
+    /**
+     * @param properties Comma-separated list of properties that are not allowed when creating or altering a keyspace.
+     */
+    void setKeyspacePropertiesDisallowedCSV(String properties);
+
+    /**
+     * @return properties that are ignored when creating or altering a keyspace.
+     */
+    Set<String> getKeyspacePropertiesIgnored();
+
+    /**
+     * @return Comma-separated list of properties that are ignored when creating or altering a keyspace.
+     */
+    String getKeyspacePropertiesIgnoredCSV();
+
+    /**
+     * @param properties properties that are ignored when creating or altering a keyspace.
+     */ 
+    void setKeyspacePropertiesIgnored(Set<String> properties);
+
+    /**
+     * @param properties Comma-separated list of properties that are ignored when creating or altering a keyspace.
+     */
+    void setKeyspacePropertiesIgnoredCSV(String properties);
 
     /**
      * Returns whether user-provided timestamps are allowed.
@@ -815,6 +875,17 @@ public interface GuardrailsMBean
     String getDataDiskUsageMaxDiskSize();
 
     /**
+     * @return Return whether a single node replicating a given keyspace being full should block writes for the
+     * entire keyspace. Returns true if this behavior is set, false otherwise.
+     */
+    boolean getDataDiskUsageKeyspaceWideProtectionEnabled();
+
+    /**
+     * @param enabled Enables or disables blocking writes for a keyspace if a node replicating that keyspace is full.
+     */
+    void setDataDiskUsageKeyspaceWideProtectionEnabled(boolean enabled);
+
+    /**
      * @param size The max disk size of the data directories when calculating disk usage thresholds, as a string
      *             formatted as in, for example, {@code 10GiB}, {@code 20MiB}, {@code 30KiB} or {@code 40B}.
      *             A {@code null} value means disabled.
@@ -1067,14 +1138,26 @@ public interface GuardrailsMBean
     void setIntersectFilteringQueryEnabled(boolean value);
 
     /**
-     * @return the configuration of password validator.
+     * @return JSON representation of the configuration of password policy
      */
-    Map<String, Object> getPasswordValidatorConfig();
+    String getPasswordPolicy();
+
+    /**
+     * @return JSON representation of the configuration of role name policy
+     */
+    String getRoleNamePolicy();
 
     /**
      * Reconfigures password validator.
      *
-     * @param config configuration of new password validator
+     * @param value configuration of new password validator
      */
-    void reconfigurePasswordValidator(Map<String, Object> config);
+    void setPasswordPolicy(String value);
+
+    /**
+     * Reconfigures role name validator.
+     *
+     * @param value configuration of new role name validator.
+     */
+    void setRoleNamePolicy(String value);
 }

@@ -36,10 +36,12 @@ import com.google.common.collect.HashMultiset;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import accord.utils.Invariants;
+
 import org.apache.cassandra.auth.Permission;
 import org.apache.cassandra.cql3.Attributes;
 import org.apache.cassandra.cql3.CQLStatement;
@@ -101,6 +103,7 @@ import org.apache.cassandra.exceptions.InvalidRequestException;
 import org.apache.cassandra.exceptions.RequestExecutionException;
 import org.apache.cassandra.exceptions.RequestValidationException;
 import org.apache.cassandra.exceptions.UnauthorizedException;
+import org.apache.cassandra.locator.NetworkTopologyStrategy;
 import org.apache.cassandra.locator.Replica;
 import org.apache.cassandra.locator.ReplicaLayout;
 import org.apache.cassandra.metrics.ClientRequestSizeMetrics;
@@ -122,6 +125,7 @@ import org.apache.cassandra.service.disk.usage.DiskUsageBroadcaster;
 import org.apache.cassandra.service.paxos.Ballot;
 import org.apache.cassandra.service.paxos.BallotGenerator;
 import org.apache.cassandra.service.paxos.Commit.Proposal;
+import org.apache.cassandra.tcm.ClusterMetadata;
 import org.apache.cassandra.transport.Dispatcher;
 import org.apache.cassandra.transport.messages.ResultMessage;
 import org.apache.cassandra.triggers.TriggerExecutor;
@@ -157,6 +161,8 @@ public abstract class ModificationStatement implements CQLStatement.SingleKeyspa
     protected final StatementRestrictions restrictions;
 
     private final Operations operations;
+
+    private final boolean isReadRequired;
 
     private final RegularAndStaticColumns updatedColumns;
 
@@ -262,6 +268,7 @@ public abstract class ModificationStatement implements CQLStatement.SingleKeyspa
         this.conditionColumns = conditionColumnsBuilder.build();
         this.requiresRead = requiresReadBuilder.build();
         this.functions = findAllFunctions();
+        this.isReadRequired = operations.requiresRead();
     }
 
     @Override
@@ -407,15 +414,36 @@ public abstract class ModificationStatement implements CQLStatement.SingleKeyspa
 
     public void validateDiskUsage(QueryOptions options, ClientState state)
     {
-        // reject writes if any replica exceeds disk usage failure limit or warn if it exceeds warn limit
-        if (Guardrails.replicaDiskUsage.enabled(state) && DiskUsageBroadcaster.instance.hasStuffedOrFullNode())
+
+        if (Guardrails.diskUsageKeyspaceWideProtection.enabled(state) &&
+            Guardrails.instance.getDataDiskUsageKeyspaceWideProtectionEnabled() &&
+            DiskUsageBroadcaster.instance.hasStuffedOrFullNode())
         {
             Keyspace keyspace = Keyspace.open(keyspace());
-
+            // If the keyspace is using NetworkTopologyStrategy then we can check each datacenter on which
+            // the keyspace is replicated.
+            if (keyspace.getMetadata().replicationStrategy instanceof NetworkTopologyStrategy)
+            {
+                for (String datacenter : ((NetworkTopologyStrategy) keyspace.getMetadata().replicationStrategy).getDatacenters())
+                {
+                    Guardrails.diskUsageKeyspaceWideProtection.guard(datacenter, state);
+                }
+            }
+            // Otherwise, if we are using SimpleStrategy then we have to check if any datacenter contains a full node.
+            else
+            {
+                for (String datacenter : ClusterMetadata.current().directory.knownDatacenters())
+                {
+                    Guardrails.diskUsageKeyspaceWideProtection.guard(datacenter, state);
+                }
+            }
+        }
+        else if (Guardrails.replicaDiskUsage.enabled(state) && DiskUsageBroadcaster.instance.hasStuffedOrFullNode())
+        {
+            Keyspace keyspace = Keyspace.open(keyspace());
             for (ByteBuffer key : buildPartitionKeyNames(options, state))
             {
                 Token token = metadata().partitioner.getToken(key);
-
                 for (Replica replica : ReplicaLayout.forTokenWriteLiveAndDown(keyspace, token).all())
                 {
                     Guardrails.replicaDiskUsage.guard(replica.endpoint(), state);
@@ -493,8 +521,8 @@ public abstract class ModificationStatement implements CQLStatement.SingleKeyspa
     throws InvalidRequestException
     {
         List<ByteBuffer> partitionKeys = restrictions.getPartitionKeys(options, state);
-        for (ByteBuffer key : partitionKeys)
-            QueryProcessor.validateKey(key);
+        for (int i = 0; i < partitionKeys.size(); i++)
+            QueryProcessor.validateKey(partitionKeys.get(i));
 
         return partitionKeys;
     }
@@ -536,11 +564,12 @@ public abstract class ModificationStatement implements CQLStatement.SingleKeyspa
         // * Deleting list element by value
         // * Performing addition on a StringType (i.e. concatenation, only supported for CAS operations)
         // * Performing addition on a NumberType, again only supported for CAS operations.
-        return operations.requiresRead();
+        return isReadRequired;
     }
 
-    private Map<DecoratedKey, Partition> readRequiredLists(Collection<ByteBuffer> partitionKeys,
-                                                           ClusteringIndexFilter filter,
+    private <F> Map<DecoratedKey, Partition> readRequiredLists(Collection<ByteBuffer> partitionKeys,
+                                                           java.util.function.Function<F, ClusteringIndexFilter> filterBuilder,
+                                                           F filterArg,
                                                            DataLimits limits,
                                                            boolean local,
                                                            ConsistencyLevel cl,
@@ -567,7 +596,7 @@ public abstract class ModificationStatement implements CQLStatement.SingleKeyspa
                                                            RowFilter.none(),
                                                            limits,
                                                            metadata().partitioner.decorateKey(key),
-                                                           filter));
+                                                           filterBuilder.apply(filterArg)));
 
         SinglePartitionReadCommand.Group group = SinglePartitionReadCommand.Group.create(commands, DataLimits.NONE);
 
@@ -996,7 +1025,8 @@ public abstract class ModificationStatement implements CQLStatement.SingleKeyspa
                 return;
 
             UpdateParameters params = makeUpdateParameters(keys,
-                                                           new ClusteringIndexSliceFilter(slices, false),
+                                                           (slicesToFilter) -> new ClusteringIndexSliceFilter(slicesToFilter, false),
+                                                           slices,
                                                            state,
                                                            options,
                                                            DataLimits.NONE,
@@ -1089,7 +1119,8 @@ public abstract class ModificationStatement implements CQLStatement.SingleKeyspa
     {
         if (clusterings.contains(Clustering.STATIC_CLUSTERING))
             return makeUpdateParameters(keys,
-                                        new ClusteringIndexSliceFilter(Slices.ALL, false),
+                                        (clusteringsToFilter) -> new ClusteringIndexSliceFilter(Slices.ALL, false),
+                                        clusterings,
                                         state,
                                         options,
                                         DataLimits.cqlLimits(1),
@@ -1100,7 +1131,8 @@ public abstract class ModificationStatement implements CQLStatement.SingleKeyspa
             );
 
         return makeUpdateParameters(keys,
-                                    new ClusteringIndexNamesFilter(clusterings, false),
+                                    (clusteringsToFilter) -> new ClusteringIndexNamesFilter(clusteringsToFilter, false),
+                                    clusterings,
                                     state,
                                     options,
                                     DataLimits.NONE,
@@ -1111,8 +1143,10 @@ public abstract class ModificationStatement implements CQLStatement.SingleKeyspa
         );
     }
 
-    private UpdateParameters makeUpdateParameters(Collection<ByteBuffer> keys,
-                                                  ClusteringIndexFilter filter,
+    private <F> UpdateParameters makeUpdateParameters(Collection<ByteBuffer> keys,
+                                                  // filter is needed rarely, so we allocate it on demand
+                                                  java.util.function.Function<F, ClusteringIndexFilter> filterBuilder,
+                                                  F filterArg,
                                                   ClientState state,
                                                   QueryOptions options,
                                                   DataLimits limits,
@@ -1124,7 +1158,8 @@ public abstract class ModificationStatement implements CQLStatement.SingleKeyspa
         // Some lists operation requires reading
         Map<DecoratedKey, Partition> lists =
             readRequiredLists(keys,
-                              filter,
+                              filterBuilder,
+                              filterArg,
                               limits,
                               local,
                               options.getConsistency(),

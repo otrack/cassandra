@@ -25,6 +25,7 @@ import com.google.common.annotations.VisibleForTesting;
 import accord.api.RoutingKey;
 import accord.primitives.Range;
 import accord.utils.Invariants;
+
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.dht.IPartitioner;
 import org.apache.cassandra.dht.Murmur3Partitioner;
@@ -52,6 +53,11 @@ public class TokenRange extends Range.EndInclusive
                                  "Token ranges cannot cover more than one keyspace start:%s, end:%s",
                                  start, end);
         return new TokenRange(start, end);
+    }
+
+    public static TokenRange create(TableId tableId, Token start, Token end)
+    {
+        return new TokenRange(new TokenKey(tableId, start), new TokenKey(tableId, end));
     }
 
     public static TokenRange createUnsafe(TokenKey start, TokenKey end)
@@ -173,4 +179,21 @@ public class TokenRange extends Range.EndInclusive
                    + TokenKey.noTableSerializer.serializedSize(t.end());
         }
     };
+
+    public static TokenRange parse(String str, IPartitioner partitioner)
+    {
+        TableId tableId;
+        {
+            int split = str.indexOf(':', str.startsWith("tid:") ? 4 : 0);
+            tableId = TableId.fromString(str.substring(0, split));
+            str = str.substring(split + 2, str.length() - 1);
+        }
+
+        String[] bounds = str.split(",");
+        if (bounds.length != 2)
+            throw new IllegalArgumentException("Invalid TokenRange: " + str);
+
+        return new TokenRange(TokenKey.parse(tableId, bounds[0], partitioner), TokenKey.parse(tableId, bounds[1], partitioner));
+    }
+
 }

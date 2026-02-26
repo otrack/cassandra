@@ -30,6 +30,7 @@ import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import com.google.common.base.Objects;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -141,7 +142,7 @@ public class RowFilter implements Iterable<RowFilter.Expression>
         add(new CustomExpression(metadata, targetIndex, value));
     }
 
-    private void add(Expression expression)
+    public void add(Expression expression)
     {
         expression.validate();
         expressions.add(expression);
@@ -550,6 +551,28 @@ public class RowFilter implements Iterable<RowFilter.Expression>
         }
 
         /**
+         * Rebind this expression to a table metadata that is expected to have equivalent columns.
+         * If any referenced column is missing, returns null;
+         * if any referenced column has a different type throws an exception
+         */
+        public Expression rebind(TableMetadata newTable)
+        {
+            throw new UnsupportedOperationException("Expression " + toString(true) + " does not support rebinding to another table definition");
+        }
+
+        protected static ColumnMetadata rebind(ColumnMetadata in, TableMetadata newTable)
+        {
+            ColumnMetadata out = newTable.getColumn(in.name);
+            if (out == null)
+                return null;
+
+            if (!out.type.equals(in.type) && !out.type.isCompatibleWith(in.type) || !in.type.isCompatibleWith(out.type))
+                throw new IllegalArgumentException("The provided TableMetadata is not compatible with the expression");
+
+            return out;
+        }
+
+        /**
          * Returns whether the provided row satisfied this expression or not.
          *
          *
@@ -735,6 +758,16 @@ public class RowFilter implements Iterable<RowFilter.Expression>
         }
 
         @Override
+        public Expression rebind(TableMetadata newTable)
+        {
+            ColumnMetadata out = rebind(column, newTable);
+            if (out == null)
+                return null;
+
+            return new SimpleExpression(out, operator, value);
+        }
+
+        @Override
         public boolean isSatisfiedBy(TableMetadata metadata, DecoratedKey partitionKey, Row row, long nowInSec)
         {
             // We support null conditions for LWT (in ColumnCondition) but not for RowFilter.
@@ -851,6 +884,16 @@ public class RowFilter implements Iterable<RowFilter.Expression>
             checkBindValueSet(key, "Unsupported unset map key for column %s", column.name);
             checkNotNull(value, "Unsupported null map value for column %s", column.name);
             checkBindValueSet(value, "Unsupported unset map value for column %s", column.name);
+        }
+
+        @Override
+        public Expression rebind(TableMetadata newTable)
+        {
+            ColumnMetadata out = rebind(column, newTable);
+            if (out == null)
+                return null;
+
+            return new MapElementExpression(out, key, operator, value);
         }
 
         @Override
@@ -976,6 +1019,12 @@ public class RowFilter implements Iterable<RowFilter.Expression>
         protected Kind kind()
         {
             return Kind.CUSTOM;
+        }
+
+        @Override
+        public Expression rebind(TableMetadata newTable)
+        {
+            return new CustomExpression(table, targetIndex, value);
         }
 
         // Filtering by custom expressions isn't supported yet, so just accept any row

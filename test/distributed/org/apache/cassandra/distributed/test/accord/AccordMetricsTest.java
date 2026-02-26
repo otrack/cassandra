@@ -26,6 +26,8 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 
+import org.assertj.core.api.Assertions;
+import org.assertj.core.data.Offset;
 import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
@@ -35,6 +37,7 @@ import org.slf4j.LoggerFactory;
 import accord.api.ProtocolModifiers;
 import accord.primitives.TxnId.FastPath;
 import accord.primitives.TxnId.FastPaths;
+
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.virtual.AccordDebugKeyspace;
 import org.apache.cassandra.distributed.api.ConsistencyLevel;
@@ -49,18 +52,16 @@ import org.apache.cassandra.metrics.DefaultNameFactory;
 import org.apache.cassandra.metrics.RatioGaugeSet;
 import org.apache.cassandra.net.Verb;
 import org.apache.cassandra.schema.SchemaConstants;
+import org.apache.cassandra.service.accord.AccordExecutor;
 import org.apache.cassandra.service.accord.AccordService;
 import org.apache.cassandra.service.accord.exceptions.AccordReadPreemptedException;
 import org.apache.cassandra.service.accord.exceptions.AccordWritePreemptedException;
 import org.apache.cassandra.service.consensus.TransactionalMode;
 import org.apache.cassandra.utils.AssertionUtils;
-import org.assertj.core.api.Assertions;
-import org.assertj.core.data.Offset;
 
 import static java.lang.String.format;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.fail;
-
 
 public class AccordMetricsTest extends AccordTestBase
 {
@@ -194,7 +195,6 @@ public class AccordMetricsTest extends AccordTestBase
 
             assertClientMetrics(0, "AccordRead", 1, 0);
             assertClientMetrics(1, "AccordRead", 0, 0);
-            // TODO (required): reenable or remove metric
             assertCoordinatorMetrics(0, "ro", 0, 0, 1, 0, 0);
             assertCoordinatorMetrics(1, "ro"    , 0, 0, 0, 0, 1);
             assertReplicaMetrics(0, "ro", 0, 0, 0);
@@ -332,7 +332,6 @@ public class AccordMetricsTest extends AccordTestBase
         assertThat(metric.apply(AccordReplicaMetrics.REPLICA_STABLE_LATENCY)).isLessThanOrEqualTo(stable);
         assertThat(metric.apply(AccordReplicaMetrics.REPLICA_PREAPPLY_LATENCY)).isEqualTo(executions);
         assertThat(metric.apply(AccordReplicaMetrics.REPLICA_APPLY_LATENCY)).isEqualTo(applications);
-        assertThat(metric.apply(AccordReplicaMetrics.REPLICA_APPLY_DURATION)).isEqualTo(scope.equals("rw") ? applications : 0);
         assertThat(metric.apply(AccordReplicaMetrics.REPLICA_DEPENDENCIES)).isEqualTo(executions);
 
         // Verify that replica metrics are published to the appropriate virtual table:
@@ -357,6 +356,7 @@ public class AccordMetricsTest extends AccordTestBase
         Map<Integer, Map<String, Long>> metrics = new HashMap<>();
         for (int i = 0; i < SHARED_CLUSTER.size(); i++)
         {
+            SHARED_CLUSTER.get(i + 1).runOnInstance(() -> AccordExecutor.HISTOGRAMS.refresh());
             Map<String, Long> map = SHARED_CLUSTER.get(i + 1).metrics().getCounters(name -> name.startsWith("org.apache.cassandra.metrics.Accord") || (name.startsWith("org.apache.cassandra.metrics.ClientRequest") && (name.endsWith("AccordRead") || name.endsWith("AccordWrite"))));
             SHARED_CLUSTER.get(i + 1).metrics().getGauges(name -> name.startsWith("org.apache.cassandra.metrics.Accord"))
                                                .forEach((key, value) -> map.put(key, ((Number)value).longValue()));

@@ -24,16 +24,19 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.function.Predicate;
+
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableList;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import accord.primitives.Routable.Domain;
 import accord.primitives.Txn;
+
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.ConsistencyLevel;
 import org.apache.cassandra.db.DecoratedKey;
@@ -307,9 +310,9 @@ public class ConsensusMigrationMutationHelper
         for (PartitionUpdate pu : mutation.getPartitionUpdates())
         {
             TableId tableId = pu.metadata().id;
-            ColumnFamilyStore cfs = ColumnFamilyStore.getIfExists(tableId);
             if (tokenShouldBeWrittenThroughAccord(cm, tableId, dk.getToken(), TransactionalMode::nonSerialWritesThroughAccord, TransactionalMigrationFromMode::nonSerialWritesThroughAccord))
             {
+                ColumnFamilyStore cfs = ColumnFamilyStore.getIfExists(tableId);
                 throwRetryOnDifferentSystem = true;
                 if (markedColumnFamilies == null)
                     markedColumnFamilies = new HashSet<>();

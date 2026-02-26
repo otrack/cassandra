@@ -39,6 +39,7 @@ import java.util.function.BooleanSupplier;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
+
 import javax.annotation.Nullable;
 
 import com.google.common.annotations.VisibleForTesting;
@@ -52,33 +53,33 @@ import com.google.common.collect.Sets;
 import com.google.common.primitives.Ints;
 import com.google.common.util.concurrent.FutureCallback;
 
-import org.apache.cassandra.db.compaction.CompactionInterruptedException;
-import org.apache.cassandra.locator.RangesAtEndpoint;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.cassandra.db.ColumnFamilyStore;
-import org.apache.cassandra.locator.Replica;
-import org.apache.cassandra.net.Verb;
-import org.apache.cassandra.repair.KeyspaceRepairManager;
-import org.apache.cassandra.repair.consistent.admin.CleanupSummary;
-import org.apache.cassandra.repair.consistent.admin.PendingStat;
-import org.apache.cassandra.repair.consistent.admin.PendingStats;
-import org.apache.cassandra.schema.Schema;
-import org.apache.cassandra.db.marshal.UTF8Type;
-import org.apache.cassandra.locator.InetAddressAndPort;
-import org.apache.cassandra.schema.SchemaConstants;
 import org.apache.cassandra.cql3.QueryProcessor;
 import org.apache.cassandra.cql3.UntypedResultSet;
+import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.SystemKeyspace;
+import org.apache.cassandra.db.compaction.CompactionInterruptedException;
 import org.apache.cassandra.db.marshal.BytesType;
+import org.apache.cassandra.db.marshal.UTF8Type;
 import org.apache.cassandra.db.marshal.UUIDType;
 import org.apache.cassandra.dht.IPartitioner;
 import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.io.util.DataInputBuffer;
 import org.apache.cassandra.io.util.DataOutputBuffer;
+import org.apache.cassandra.locator.InetAddressAndPort;
+import org.apache.cassandra.locator.RangesAtEndpoint;
+import org.apache.cassandra.locator.Replica;
 import org.apache.cassandra.net.Message;
+import org.apache.cassandra.net.Verb;
+import org.apache.cassandra.repair.KeyspaceRepairManager;
+import org.apache.cassandra.repair.NoSuchRepairSessionException;
+import org.apache.cassandra.repair.SharedContext;
+import org.apache.cassandra.repair.consistent.admin.CleanupSummary;
+import org.apache.cassandra.repair.consistent.admin.PendingStat;
+import org.apache.cassandra.repair.consistent.admin.PendingStats;
 import org.apache.cassandra.repair.messages.FailSession;
 import org.apache.cassandra.repair.messages.FinalizeCommit;
 import org.apache.cassandra.repair.messages.FinalizePromise;
@@ -88,10 +89,11 @@ import org.apache.cassandra.repair.messages.PrepareConsistentResponse;
 import org.apache.cassandra.repair.messages.RepairMessage;
 import org.apache.cassandra.repair.messages.StatusRequest;
 import org.apache.cassandra.repair.messages.StatusResponse;
-import org.apache.cassandra.repair.SharedContext;
+import org.apache.cassandra.schema.Schema;
+import org.apache.cassandra.schema.SchemaConstants;
 import org.apache.cassandra.schema.TableId;
+import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.service.ActiveRepairService;
-import org.apache.cassandra.repair.NoSuchRepairSessionException;
 import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.utils.Throwables;
 import org.apache.cassandra.utils.TimeUUID;
@@ -106,7 +108,12 @@ import static org.apache.cassandra.net.Verb.FINALIZE_PROMISE_MSG;
 import static org.apache.cassandra.net.Verb.PREPARE_CONSISTENT_RSP;
 import static org.apache.cassandra.net.Verb.STATUS_REQ;
 import static org.apache.cassandra.net.Verb.STATUS_RSP;
-import static org.apache.cassandra.repair.consistent.ConsistentSession.State.*;
+import static org.apache.cassandra.repair.consistent.ConsistentSession.State.FAILED;
+import static org.apache.cassandra.repair.consistent.ConsistentSession.State.FINALIZED;
+import static org.apache.cassandra.repair.consistent.ConsistentSession.State.FINALIZE_PROMISED;
+import static org.apache.cassandra.repair.consistent.ConsistentSession.State.PREPARED;
+import static org.apache.cassandra.repair.consistent.ConsistentSession.State.PREPARING;
+import static org.apache.cassandra.repair.consistent.ConsistentSession.State.REPAIRING;
 import static org.apache.cassandra.repair.messages.RepairMessage.always;
 import static org.apache.cassandra.repair.messages.RepairMessage.sendAck;
 import static org.apache.cassandra.repair.messages.RepairMessage.sendFailureResponse;
@@ -249,19 +256,44 @@ public class LocalSessions
      */
     private boolean isSuperseded(LocalSession session)
     {
+        // to reduce overheads of intersect calculation for tables within the same keyspace
+        Map<String, Collection<Range<Token>>> rangesPerKeyspaceCache = new HashMap<>();
         for (TableId tid : session.tableIds)
         {
-            RepairedState state = repairedStates.get(tid);
+            TableMetadata tableMetadata = getTableMetadata(tid);
+            if (tableMetadata == null) // if a table was removed - ignore it
+                continue;
 
+            RepairedState state = repairedStates.get(tid);
             if (state == null)
                 return false;
 
-            long minRepaired = state.minRepairedAt(session.ranges);
+            Collection<Range<Token>> actualRanges = rangesPerKeyspaceCache.computeIfAbsent(tableMetadata.keyspace, (keyspace) -> {
+                Collection<Range<Token>> localRanges = getLocalRanges(tableMetadata.keyspace);
+                if (localRanges.isEmpty()) // to handle the case when we run before the information about owned ranges is properly populated
+                    return session.ranges;
+
+                // ignore token ranges which were moved to other nodes and not owned by the current one anymore
+                return Range.intersect(session.ranges, localRanges);
+            });
+            long minRepaired = state.minRepairedAt(actualRanges);
             if (minRepaired <= session.repairedAt)
                 return false;
         }
 
         return true;
+    }
+
+    @VisibleForTesting
+    protected TableMetadata getTableMetadata(TableId tableId)
+    {
+        return Schema.instance.getTableMetadata(tableId);
+    }
+
+    @VisibleForTesting
+    protected Collection<Range<Token>> getLocalRanges(String keyspace)
+    {
+        return StorageService.instance.getLocalAndPendingRanges(keyspace);
     }
 
     public RepairedState.Stats getRepairedStats(TableId tid, Collection<Range<Token>> ranges)

@@ -46,19 +46,17 @@ import java.util.stream.Collectors;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Strings;
-import com.google.common.collect.ImmutableList;
 import com.google.common.util.concurrent.Futures;
 
 import org.agrona.collections.IntArrayList;
-import org.apache.cassandra.tcm.compatibility.TokenRingUtils;
-import org.apache.cassandra.utils.FBUtilities;
-import org.apache.cassandra.utils.Shared;
 import org.assertj.core.api.Assertions;
 import org.junit.Assert;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import accord.primitives.TxnId;
+import accord.topology.EpochReady;
+
 import org.apache.cassandra.db.virtual.AccordDebugKeyspace;
 import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.distributed.Cluster;
@@ -95,19 +93,22 @@ import org.apache.cassandra.tcm.ClusterMetadataService;
 import org.apache.cassandra.tcm.Commit;
 import org.apache.cassandra.tcm.Epoch;
 import org.apache.cassandra.tcm.Transformation;
+import org.apache.cassandra.tcm.compatibility.TokenRingUtils;
 import org.apache.cassandra.tcm.membership.NodeId;
 import org.apache.cassandra.tcm.ownership.ReplicaGroups;
+import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.Isolated;
+import org.apache.cassandra.utils.Shared;
 import org.apache.cassandra.utils.concurrent.AsyncPromise;
 import org.apache.cassandra.utils.concurrent.CountDownLatch;
 
 import static com.google.common.util.concurrent.Uninterruptibles.sleepUninterruptibly;
-import static org.assertj.core.api.Assertions.assertThat;
 import static org.apache.cassandra.config.CassandraRelevantProperties.BOOTSTRAP_SCHEMA_DELAY_MS;
 import static org.apache.cassandra.config.CassandraRelevantProperties.BROADCAST_INTERVAL_MS;
 import static org.apache.cassandra.config.CassandraRelevantProperties.REPLACE_ADDRESS_FIRST_BOOT;
 import static org.apache.cassandra.config.CassandraRelevantProperties.RING_DELAY;
 import static org.apache.cassandra.distributed.impl.TestEndpointCache.toCassandraInetAddressAndPort;
+import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * Utilities for working with jvm-dtest clusters.
@@ -336,11 +337,26 @@ public class ClusterUtils
                                                               I toReplace,
                                                               BiConsumer<I, WithProperties> fn)
     {
-        IInstanceConfig toReplaceConf = toReplace.config();
-        I inst = addInstance(cluster, toReplaceConf, c -> c.set("auto_bootstrap", true)
-                                                           .set("progress_barrier_min_consistency_level", ConsistencyLevel.ONE));
-        return startHostReplacement(toReplace, inst, fn);
+        return replaceHostAndStart(cluster, toReplace, fn, ignore -> {});
+    }
 
+    public static <I extends IInstance> I replaceHostAndStart(AbstractCluster<I> cluster,
+                                                              I toReplace,
+                                                              BiConsumer<I, WithProperties> fn,
+                                                              Consumer<IInstanceConfig> configFn)
+    {
+        IInstanceConfig toReplaceConf = toReplace.config();
+        I inst = addInstance(cluster, toReplaceConf, c -> {
+            c.set("auto_bootstrap", true)
+             .set("progress_barrier_min_consistency_level", ConsistencyLevel.ONE);
+            configFn.accept(c);
+        });
+        return startHostReplacement(toReplace, inst, fn);
+    }
+
+    public static <I extends IInstance> I startHostReplacement(I toReplace, I inst)
+    {
+        return startHostReplacement(toReplace, inst, (i1, i2) -> {});
     }
 
     /**
@@ -701,6 +717,9 @@ public class ClusterUtils
 
     public static Epoch maxEpoch(ICluster<IInvokableInstance> cluster, int... nodes)
     {
+        if (nodes == null || nodes.length == 0)
+            return maxEpoch(cluster);
+
         Epoch max = null;
         for (int id : nodes)
         {
@@ -786,7 +805,7 @@ public class ClusterUtils
     public static Map<String, Epoch> getPeerEpochs(IInvokableInstance requester)
     {
         Map<String, Long> map = requester.callOnInstance(() -> {
-            ImmutableList<InetAddressAndPort> peers = ClusterMetadata.current().directory.allAddresses();
+            Set<InetAddressAndPort> peers = ClusterMetadata.current().directory.allAddresses();
             CountDownLatch latch = CountDownLatch.newCountDownLatch(peers.size());
             Map<String, Long> epochs = new ConcurrentHashMap<>(peers.size());
             peers.forEach(peer -> {
@@ -1698,7 +1717,7 @@ public class ClusterUtils
             i.runOnInstance(() -> {
                 try
                 {
-                    AccordService.instance().epochReady(Epoch.create(epoch)).get();
+                    AccordService.instance().epochReady(Epoch.create(epoch), EpochReady::reads).get();
                 }
                 catch (InterruptedException | ExecutionException e)
                 {

@@ -118,6 +118,7 @@ public class ShardedMultiWriter implements SSTableMultiWriter
                          .setSerializationHeader(header)
                          .addDefaultComponents(indexGroups)
                          .setSecondaryIndexGroups(indexGroups)
+                         .setCompressionDictionaryManager(cfs.compressionDictionaryManager())
                          .build(txn, cfs);
     }
 
@@ -202,6 +203,14 @@ public class ShardedMultiWriter implements SSTableMultiWriter
         for (int i = 0; i <= currentWriter; ++i)
             bytesWritten += writers[i].getEstimatedOnDiskBytesWritten();
         return bytesWritten;
+    }
+
+    public long getTotalRows()
+    {
+        long totalRows = 0;
+        for (int i = 0; i <= currentWriter; ++i)
+            totalRows += writers[i].getTotalRows();
+        return totalRows;
     }
 
     @Override

@@ -22,6 +22,7 @@ import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Optional;
 import java.util.stream.Collectors;
 
 import com.google.common.collect.RangeSet;
@@ -43,7 +44,6 @@ import org.apache.cassandra.utils.ByteBufferUtil;
 
 import static org.apache.cassandra.cql3.statements.RequestValidations.checkFalse;
 import static org.apache.cassandra.cql3.statements.RequestValidations.invalidRequest;
-import java.util.Optional;
 
 /**
  * A simple predicate on a columns expression (e.g. columnA = X).
@@ -258,9 +258,21 @@ public final class SimpleRestriction implements SingleRestriction
 
     private List<ClusteringElements> bindAndGetSingleTermClusteringElements(QueryOptions options)
     {
+        if (values.isSingleTerm(options))
+        {
+            ByteBuffer value = bindAndGetSingle(options);
+            return Collections.singletonList(ClusteringElements.of(columnsExpression.columnSpecification(), value, isOnToken()));
+        }
+
         List<ByteBuffer> values = bindAndGet(options);
         if (values.isEmpty())
             return Collections.emptyList();
+
+        if (values.size() == 1)
+        {
+            ClusteringElements value = ClusteringElements.of(columnsExpression.columnSpecification(), values.get(0), isOnToken());
+            return Collections.singletonList(value);
+        }
 
         List<ClusteringElements> elements = new ArrayList<>(values.size());
         for (int i = 0; i < values.size(); i++)
@@ -286,6 +298,13 @@ public final class SimpleRestriction implements SingleRestriction
         validate(buffers);
         buffers.forEach(this::validate);
         return buffers;
+    }
+
+    private ByteBuffer bindAndGetSingle(QueryOptions options)
+    {
+        ByteBuffer buffer = values.bindAndGetSingleTermValue(options);
+        validate(buffer);
+        return buffer;
     }
 
     private List<List<ByteBuffer>> bindAndGetElements(QueryOptions options)
@@ -343,8 +362,7 @@ public final class SimpleRestriction implements SingleRestriction
                 List<ByteBuffer> buffers = bindAndGet(options);
                 if (operator.kind() != Operator.Kind.BINARY)
                 {
-                    // For BETWEEN we support like in SQL reversed bounds
-                    if (operator.kind() == Operator.Kind.TERNARY)
+                    if (operator == Operator.IN && !column.type.isCounter())
                         buffers.sort(column.type);
                     filter.add(column, operator, multiInputOperatorValues(column, buffers));
                 }

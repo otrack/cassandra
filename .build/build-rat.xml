@@ -43,6 +43,9 @@
             <fileset dir="." includesfile="${build.dir}/.ratinclude">
                  <!-- Config files with not much creativity -->
                  <exclude name=".asf.yaml"/>
+                 <exclude name=".git-blame-ignore-revs"/>
+                 <exclude name=".idea/codeStyles/Project.xml"/>
+                 <exclude name=".idea/codeStyles/codeStyleConfig.xml"/>
                  <exclude name=".snyk"/>
                  <exclude name="**/cassandra*.yaml"/>
                  <exclude NAME="doc/antora.yml"/>
@@ -74,6 +77,7 @@
                  <exclude name="test/data/jmxdump/cassandra-*-jmx.yaml"/>
                  <!-- Documentation files -->
                  <exclude name=".github/pull_request_template.md"/>
+                 <exclude name=".github/workflows/code-check.yaml"/>
                  <exclude NAME="doc/modules/**/*"/>
                  <exclude NAME="src/java/**/*.md"/>
                  <exclude NAME="**/README*"/>

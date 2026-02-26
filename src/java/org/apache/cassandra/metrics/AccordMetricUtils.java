@@ -20,9 +20,11 @@ package org.apache.cassandra.metrics;
 
 import java.util.function.Function;
 
+import com.codahale.metrics.Gauge;
+
 import accord.local.durability.DurabilityService;
 import accord.topology.TopologyManager;
-import com.codahale.metrics.Gauge;
+
 import org.apache.cassandra.service.accord.AccordService;
 import org.apache.cassandra.service.accord.IAccordService;
 
@@ -45,9 +47,9 @@ public class AccordMetricUtils
 
     static <I, T> Gauge<T> fromAccordService(Function<IAccordService, I> initialStep, Function<I, T> finalStep, T ifNotSetup)
     {
-        if (AccordService.isSetup())
+        if (AccordService.isSetupOrStarting())
         {
-            IAccordService service = AccordService.instance();
+            IAccordService service = AccordService.unsafeInstance();
             if (!service.isEnabled())
                 return () -> ifNotSetup;
             I intermediate = initialStep.apply(service);

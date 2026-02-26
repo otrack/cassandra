@@ -24,6 +24,7 @@ import java.util.function.Supplier;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableSet;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -73,7 +74,7 @@ public class BtiTableWriter extends SortedTableWriter<BtiFormatPartitionWriter, 
     @Override
     protected TrieIndexEntry createRowIndexEntry(DecoratedKey key, DeletionTime partitionLevelDeletion, long finishResult) throws IOException
     {
-        TrieIndexEntry entry = TrieIndexEntry.create(partitionWriter.getInitialPosition(),
+        TrieIndexEntry entry = TrieIndexEntry.create(partitionWriter.getPartitionStartPosition(),
                                                      finishResult,
                                                      partitionLevelDeletion,
                                                      partitionWriter.getRowIndexBlockCount());
@@ -262,8 +263,8 @@ public class BtiTableWriter extends SortedTableWriter<BtiFormatPartitionWriter, 
         PartitionIndex completedPartitionIndex()
         {
             complete();
-            rowIndexFHBuilder.withLengthOverride(0);
-            partitionIndexFHBuilder.withLengthOverride(0);
+            rowIndexFHBuilder.withLengthOverride(NO_LENGTH_OVERRIDE);
+            partitionIndexFHBuilder.withLengthOverride(NO_LENGTH_OVERRIDE);
             try
             {
                 return PartitionIndex.load(partitionIndexFHBuilder, metadata.getLocal().partitioner, false);
@@ -334,7 +335,8 @@ public class BtiTableWriter extends SortedTableWriter<BtiFormatPartitionWriter, 
                                              getIOOptions().writerOptions,
                                              getMetadataCollector(),
                                              ensuringInBuildInternalContext(operationType),
-                                             getIOOptions().flushCompression);
+                                             getIOOptions().flushCompression,
+                                             getCompressionDictionaryManager());
         }
 
         @Override

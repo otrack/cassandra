@@ -31,10 +31,12 @@ import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 
 import com.google.common.annotations.VisibleForTesting;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.concurrent.ExecutorPlus;
+import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.ConsistencyLevel;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.exceptions.ReadFailureException;
@@ -263,6 +265,9 @@ public class IndexStatusManager
 
     private static boolean shouldWriteLegacyStatusFormat(CassandraVersion minVersion)
     {
+        if (DatabaseDescriptor.getForceOptimizedIndexStatusFormat())
+            return false;
+
         return minVersion == null || (minVersion.major == 5 && minVersion.minor == 0 && minVersion.patch < 3);
     }
 

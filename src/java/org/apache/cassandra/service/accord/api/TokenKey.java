@@ -36,6 +36,7 @@ import accord.primitives.RangeFactory;
 import accord.primitives.Ranges;
 import accord.utils.Invariants;
 import accord.utils.VIntCoding;
+
 import org.apache.cassandra.db.marshal.ByteBufferAccessor;
 import org.apache.cassandra.db.marshal.ValueAccessor;
 import org.apache.cassandra.dht.IPartitioner;
@@ -149,12 +150,15 @@ public final class TokenKey extends AccordRoutableKey implements RoutingKey, Ran
 
     public static TokenKey parse(String str, IPartitioner partitioner)
     {
-        TableId tableId;
-        {
-            int split = str.indexOf(':', str.startsWith("tid:") ? 4 : 0);
-            tableId = TableId.fromString(str.substring(0, split));
-            str = str.substring(split + 1);
-        }
+
+        int split = str.indexOf(':', str.startsWith("tid:") ? 4 : 0);
+        TableId tableId = TableId.fromString(str.substring(0, split));
+        str = str.substring(split + 1);
+        return parse(tableId, str, partitioner);
+    }
+
+    public static TokenKey parse(TableId tableId, String str, IPartitioner partitioner)
+    {
         if (str.endsWith("Inf"))
         {
             return new TokenKey(tableId, str.charAt(0) == '-' ? MIN_TABLE_SENTINEL : MAX_TABLE_SENTINEL, partitioner.getMinimumToken());

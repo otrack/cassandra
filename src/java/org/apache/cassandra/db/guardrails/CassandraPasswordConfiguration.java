@@ -20,14 +20,17 @@ package org.apache.cassandra.db.guardrails;
 
 import java.util.Arrays;
 
+import org.passay.IllegalSequenceRule;
+
 import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.io.util.File;
-import org.passay.IllegalSequenceRule;
 
 import static java.lang.String.format;
 
 public class CassandraPasswordConfiguration
 {
+    public static final int MAX_LENGTH = 1000;
+
     public static final int MAX_CHARACTERISTICS = 4;
 
     // default values
@@ -172,6 +175,11 @@ public class CassandraPasswordConfiguration
         if (digitsFail < 0) throw mustBePositiveException(DIGIT_FAIL_KEY);
         if (lengthWarn < 0) throw mustBePositiveException(LENGTH_WARN_KEY);
         if (lengthFail < 0) throw mustBePositiveException(LENGTH_FAIL_KEY);
+
+        if (MAX_LENGTH < maxLength)
+            throw new ConfigurationException(format("%s can not be greater than %s",
+                                                    MAX_LENGTH_KEY,
+                                                    MAX_LENGTH));
 
         if (maxLength <= lengthWarn)
             throw getValidationException(MAX_LENGTH_KEY, maxLength, LENGTH_WARN_KEY, lengthWarn);

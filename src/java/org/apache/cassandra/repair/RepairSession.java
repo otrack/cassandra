@@ -30,11 +30,13 @@ import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.atomic.AtomicBoolean;
+
 import javax.annotation.Nullable;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.Lists;
 import com.google.common.util.concurrent.FutureCallback;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -119,12 +121,14 @@ public class RepairSession extends AsyncFuture<RepairSessionResult> implements I
 
     /** Range to repair */
     public final boolean isIncremental;
+    public final boolean allReplicas;
     public final PreviewKind previewKind;
     public final boolean repairData;
-    public final boolean repairPaxos; // TODO (now): rename to repairPaxosIfSupported
+    public final boolean repairPaxos;
     public final boolean repairAccord;
     public final boolean dontPurgeTombstones;
     public final boolean excludedDeadNodes;
+    public final boolean permitNoQuorum;
 
     private final AtomicBoolean isFailed = new AtomicBoolean(false);
 
@@ -161,6 +165,7 @@ public class RepairSession extends AsyncFuture<RepairSessionResult> implements I
                          boolean excludedDeadNodes,
                          String keyspace,
                          RepairParallelism parallelismDegree,
+                         boolean allReplicas,
                          boolean isIncremental,
                          boolean pullRepair,
                          PreviewKind previewKind,
@@ -168,7 +173,7 @@ public class RepairSession extends AsyncFuture<RepairSessionResult> implements I
                          boolean repairData,
                          boolean repairPaxos,
                          boolean dontPurgeTombstones,
-                         boolean repairAccord,
+                         boolean repairAccord, boolean permitNoQuorum,
                          String... cfnames)
     {
         this.ctx = ctx;
@@ -176,12 +181,14 @@ public class RepairSession extends AsyncFuture<RepairSessionResult> implements I
         this.repairData = repairData;
         this.repairPaxos = repairPaxos;
         this.repairAccord = repairAccord;
+        this.permitNoQuorum = permitNoQuorum;
         assert cfnames.length > 0 : "Repairing no column families seems pointless, doesn't it";
         this.state = new SessionState(ctx, parentRepairSession, keyspace, cfnames, commonRange);
         this.parallelismDegree = parallelismDegree;
         this.isIncremental = isIncremental;
         this.previewKind = previewKind;
         this.pullRepair = pullRepair;
+        this.allReplicas = allReplicas && !commonRange.hasSkippedReplicas;
         this.optimiseStreams = optimiseStreams;
         this.dontPurgeTombstones = dontPurgeTombstones;
         this.taskExecutor = new SafeExecutor(createExecutor(ctx));
@@ -509,5 +516,11 @@ public class RepairSession extends AsyncFuture<RepairSessionResult> implements I
         {
             delegate.shutdown();
         }
+    }
+
+    @VisibleForTesting
+    public int syncingCount()
+    {
+        return syncingTasks.size();
     }
 }

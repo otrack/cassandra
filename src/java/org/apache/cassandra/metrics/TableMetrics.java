@@ -30,21 +30,23 @@ import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Predicate;
 
-import com.google.common.annotations.VisibleForTesting;
-import com.google.common.collect.ImmutableMap;
-import com.google.common.collect.Iterables;
-import com.google.common.collect.Maps;
-import org.apache.commons.lang3.ArrayUtils;
-
 import com.codahale.metrics.Counter;
 import com.codahale.metrics.Gauge;
 import com.codahale.metrics.Histogram;
 import com.codahale.metrics.Meter;
 import com.codahale.metrics.Metric;
 import com.codahale.metrics.Timer;
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.Iterables;
+import com.google.common.collect.Maps;
+
+import org.apache.commons.lang3.ArrayUtils;
+
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.Keyspace;
+import org.apache.cassandra.db.compression.CompressionDictionaryManager;
 import org.apache.cassandra.db.lifecycle.SSTableSet;
 import org.apache.cassandra.db.lifecycle.View;
 import org.apache.cassandra.db.memtable.Memtable;
@@ -154,6 +156,8 @@ public class TableMetrics
     public final Gauge<Long> maxPartitionSize;
     /** Size of the smallest compacted partition */
     public final Gauge<Long> meanPartitionSize;
+    /** Memory usage of cached compression dictionaries */
+    public final Gauge<Long> compressionDictionariesMemoryUsed;
     /** Off heap memory used by compression meta data*/
     public final Gauge<Long> compressionMetadataOffHeapMemoryUsed;
     /** Tombstones scanned in queries on this CF */
@@ -771,6 +775,19 @@ public class TableMetrics
                 return count > 0 ? sum / count : 0;
             }
         });
+        compressionDictionariesMemoryUsed = createTableGauge("CompressionDictionariesMemoryUsed", new Gauge<Long>()
+        {
+            @Override
+            public Long getValue()
+            {
+                CompressionDictionaryManager compressionDictionaryManager = cfs.compressionDictionaryManager();
+                if (compressionDictionaryManager != null)
+                    return compressionDictionaryManager.cachedDictionariesMemoryUsed();
+                else
+                    return 0L;
+            }
+        });
+
         compressionMetadataOffHeapMemoryUsed = createTableGauge("CompressionMetadataOffHeapMemoryUsed", new Gauge<Long>()
         {
             public Long getValue()

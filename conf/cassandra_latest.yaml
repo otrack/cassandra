@@ -695,6 +695,11 @@ commitlog_segment_size: 32MiB
 # The default setting is legacy when the storage compatibility is set to 4 or auto otherwise.
 commitlog_disk_access_mode: auto
 
+# Set the disk access mode for reading SSTables during compaction. The allowed values are:
+# - auto: inherit from disk_access_mode (default)
+# - direct: use direct I/O for compaction reads, bypassing the OS page cache
+# compaction_read_disk_access_mode: auto
+
 # Compression to apply to SSTables as they flush for compressed tables.
 # Note that tables without compression enabled do not respect this flag.
 #
@@ -1913,6 +1918,11 @@ batch_size_fail_threshold: 50KiB
 # Log WARN on any batches not of type LOGGED than span across more partitions than this limit
 unlogged_batch_across_partitions_warn_threshold: 10
 
+# GCInspector configs:
+# For GC like ShenandoahGC/ZGC etc., there are GC events that do not have STW pauses.
+# Such events are called Concurrent phases. Operator might find it reasonable to use lower thresholds
+# for events require STW pauses and higher thresholds for concurrent phases.
+#
 # GC Pauses greater than 200 ms will be logged at INFO level
 # This threshold can be adjusted to minimize logging if necessary
 # Min unit: ms
@@ -1923,6 +1933,17 @@ unlogged_batch_across_partitions_warn_threshold: 10
 # will deactivate the feature.
 # Min unit: ms
 # gc_warn_threshold: 1000ms
+
+# GC Concurrent phase greater than 1000 ms will be logged at INFO level
+# This threshold can be adjusted to minimize logging if necessary
+# Min unit: ms
+# gc_concurrent_phase_log_threshold: 1000ms
+
+# GC Concurrent phase than gc_concurrent_phase_warn_threshold will be logged at WARN level
+# Adjust the threshold based on your application throughput requirement. Setting to 0
+# will deactivate the feature.
+# Min unit: ms
+# gc_concurrent_phase_warn_threshold: 2000ms
 
 # Maximum size of any value in SSTables. Safety measure to detect SSTable corruption
 # early. Any value size larger than this threshold will result into marking an SSTable
@@ -2279,6 +2300,10 @@ drop_compact_storage_enabled: false
 # Min unit: B
 # data_disk_usage_max_disk_size:
 #
+# Configures the disk usage guardrails to block all writes to a keyspace if any node which replicates that keyspace
+# is full. By default, this is disabled.
+# data_disk_usage_keyspace_wide_protection_enabled: false
+#
 # Guardrail to warn or fail when the minimum replication factor is lesser than threshold.
 # This would also apply to system keyspaces.
 # Suggested value for use in production: 2 or higher
@@ -2289,6 +2314,98 @@ drop_compact_storage_enabled: false
 # This would also apply to system keyspaces.
 # maximum_replication_factor_warn_threshold: -1
 # maximum_replication_factor_fail_threshold: -1
+
+#role_name_policy:
+#  # Implementation class of a validator. When not in form of FQCN, the
+#  # package name org.apache.cassandra.db.guardrails is prepended.
+#  # By default, there is no validator.
+#  #validator_class_name: YourValidatorOfRoleNames
+#  # Implementation class of related generator which generates values which are valid when
+#  # tested against this validator. When not in form of FQCN, the
+#  # package name org.apache.cassandra.db.guardrails is prepended.
+#  # By default, there is no generator.
+#  # There is currently only one generator possible to configure - UUIDRoleNameGenerator
+#  generator_class_name: UUIDRoleNameGenerator
+#  # Minimum generated size of a name when name_size option is specified in CQL.
+#  # This can not be less than 10 and more than 32.
+#  #min_generated_name_size: 10
+
+# If this is set to false, then it is not possible to call reconfiguration
+# method in GuardrailsMBean. It will effectively forbid the reconfiguration of role_name_policy in runtime.
+# You would need to stop the node, change the configuration in cassandra.yaml and start the node again.
+# Defaults to true, which means that reconfiguration of role_name_policy via JMX is possible.
+#role_name_policy_reconfiguration_enabled: true
+
+# If this is set to false, then it is not possible to call reconfiguration
+# method in GuardrailsMBean. It will effectively forbid the reconfiguration of role_name_policy in runtime.
+# You would need to stop the node, change the configuration in cassandra.yaml and start the node again.
+# Defaults to true, which means that reconfiguration of role_name_policy via JMX is possible.
+#rolename_validator_reconfiguration_enabled: true
+
+# Guardrail to warn or fail when setting / altering a password.
+# Supported character sets are (both upper and lower-case): English, Cyrillic and modern Cyrillic, Czech, German, Polish.
+# Password is invalid if all characters are from non-supported character set. If a password is otherwise valid,
+# but it contains characters from unsupported language, these characters contribute only to password length rule.
+# All digits and all following special characters are supported too: !"#$%&()*+,-./:;<=>?@[\]^_`{|}~
+#password_policy:
+#  # Implementation class of a validator. When not in form of FQCN, the
+#  # package name org.apache.cassandra.db.guardrails is prepended.
+#  # By default, there is no validator.
+#  validator_class_name: CassandraPasswordValidator
+#  # Implementation class of related generator which generates values which are valid when
+#  # tested against this validator. When not in form of FQCN, the
+#  # package name org.apache.cassandra.db.guardrails is prepended.
+#  # By default, there is no generator.
+#  generator_class_name: CassandraPasswordGenerator
+#  # There are four characteristics:
+#  # upper-case, lower-case, special character and digit.
+#  # If this value is set e.g. to 3, a password has to consist of 3 out of 4 characteristics.
+#  # For example, it has to contain at least 2 upper-case characters, 2 lower-case, and 2 digits to pass,
+#  # but it does not have to contain any special characters.
+#  # If number of characteristics found in the password is less than or equal to this number, it will emit warning.
+#  characteristic_warn: 3
+#  # If number of characteristics found in the password is less than or equal to this number, it will emit failure.
+#  characteristic_fail: 2
+#  # Maximum length of a password. Defaults to 1000.
+#  max_length: 1000
+#  # If password is shorter than this value, the validator will emit a warning.
+#  length_warn: 12
+#  # If a password is shorter than this value, the validator will emit a failure.
+#  length_fail: 8
+#  # If a password does not contain at least n upper-case characters, the validator will emit a warning.
+#  upper_case_warn: 2
+#  # If a password does not contain at least n upper-case characters, the validator will emit a failure.
+#  upper_case_fail: 1
+#  # If a password does not contain at least n lower-case characters, the validator will emit a warning.
+#  lower_case_warn: 2
+#  # If a password does not contain at least n lower-case characters, the validator will emit a failure.
+#  lower_case_fail: 1
+#  # If a password does not contain at least n digits, the validator will emit a warning.
+#  digit_warn: 2
+#  # If a password does not contain at least n digits, the validator will emit a failure.
+#  digit_fail: 1
+#  # If a password does not contain at least n special characters, the validator will emit a warning.
+#  special_warn: 2
+#  # If a password does not contain at least n special characters, the validator will emit a failure.
+#  special_fail: 1
+#  # If a password contain illegal sequences that at least this long, it is invalid.
+#  # Illegal sequences might be either alphabetical (form 'abcde'),
+#  # numerical (form '34567'), or US qwerty (form 'asdfg') as well as sequencies from supported character sets.
+#  # The minimum value for this property is 3, by default it is set to 5.
+#  illegal_sequence_length: 5
+#  # Dictionary to check the passwords against. Defaults to no dictionary.
+#  # Whole dictionary is cached into memory. Use with caution with relatively big dictionaries.
+#  # Entries in a dictionary, one per line, have to be sorted per String's compareTo contract.
+#  #dictionary: /path/to/dictionary/file
+#  # If set to true, a user will be informed what policies a suggested password is missing in order to be valid.
+#  # Defaults to true.
+#  detailed_messages: true
+
+# If this is set to false, then it is not possible to call reconfiguration
+# method in GuardrailsMBean. It will effectively forbid the reconfiguration of password validator in runtime.
+# You would need to stop the node, change the configuration in cassandra.yaml and start the node again.
+# Defaults to true, which means that reconfiguration of password validator via JMX is possible.
+#password_policy_reconfiguration_enabled: true
 
 # Guardrail to enable a CREATE or ALTER TABLE statement when default_time_to_live is set to 0
 # and the table is using TimeWindowCompactionStrategy compaction or a subclass of it.
@@ -2324,6 +2441,9 @@ default_secondary_index_enabled: true
 # Startup Checks are executed as part of Cassandra startup process, not all of them
 # are configurable (so you can disable them) but these which are enumerated bellow.
 # Uncomment the startup checks and configure them appropriately to cover your needs.
+#
+# It is possible to implement custom startup checks by implementing StatupCheck interface
+# and placing JAR on a classpath, using SPI mechanism.
 #
 #startup_checks:
 # Verifies correct ownership of attached locations on disk at startup. See CASSANDRA-16879 for more details.
@@ -2529,3 +2649,27 @@ storage_compatibility_mode: NONE
 #         # especially in keyspaces with many tables. The splitter avoids batching tables together if they
 #         # exceed other configuration parameters like bytes_per_assignment or partitions_per_assignment.
 #         max_tables_per_assignment: 64
+
+# Dictionary compression settings for ZSTD dictionary-based compression
+# These settings control the automatic training and caching of compression dictionaries
+# for tables that use ZSTD dictionary compression.
+
+# How often to refresh compression dictionaries across the cluster.
+# During refresh, nodes will check for newer dictionary versions and update their caches.
+# Min unit: s
+compression_dictionary_refresh_interval: 3600s
+
+# Initial delay before starting the first dictionary refresh cycle after node startup.
+# This prevents all nodes from refreshing simultaneously when the cluster starts.
+# Min unit: s
+compression_dictionary_refresh_initial_delay: 10s
+
+# Maximum number of compression dictionaries to cache per table.
+# Each table using dictionary compression can have multiple dictionaries cached
+# (current version plus recently used versions for reading older SSTables).
+compression_dictionary_cache_size: 10
+
+# How long to keep compression dictionaries in the cache before they expire.
+# Expired dictionaries will be removed from memory but can be reloaded if needed.
+# Min unit: s
+compression_dictionary_cache_expire: 24h

@@ -39,13 +39,16 @@ import java.util.stream.Collectors;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.ListenableFutureTask;
+
+import net.openhft.chronicle.core.util.SerializablePredicate;
+
 import org.junit.After;
 import org.junit.BeforeClass;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import accord.messages.AbstractRequest;
-import net.openhft.chronicle.core.util.SerializablePredicate;
+import accord.messages.NoWaitRequest;
+
 import org.apache.cassandra.config.CassandraRelevantProperties;
 import org.apache.cassandra.cql3.CQLTester;
 import org.apache.cassandra.cql3.Duration;
@@ -94,6 +97,11 @@ import static org.assertj.core.api.Assertions.fail;
 // checkstyle: suppress below 'blockSystemPropertyUsage'
 public class TestBaseImpl extends DistributedTestBase
 {
+    static
+    {
+        System.setProperty("accord.debug", "true"); // checkstyle: suppress nearby 'blockSystemPropertyUsage'
+    }
+
     private static final Logger logger = LoggerFactory.getLogger(TestBaseImpl.class);
 
     public static final Object[][] EMPTY_ROWS = new Object[0][];
@@ -109,8 +117,8 @@ public class TestBaseImpl extends DistributedTestBase
 
         // This isn't perfect at excluding messages so make sure it excludes the ones you care about in your test
         public static final SerializablePredicate<Message<?>> EXCLUDE_SYNC_POINT_MESSAGES = message -> {
-            if (message.payload instanceof AbstractRequest)
-                return !((AbstractRequest<?>)message.payload).txnId.isSyncPoint();
+            if (message.payload instanceof NoWaitRequest<?,?>)
+                return !((NoWaitRequest<?,?>)message.payload).txnId.isSyncPoint();
             return true;
         };
 
@@ -251,7 +259,7 @@ public class TestBaseImpl extends DistributedTestBase
         return sb.toString();
     }
 
-    protected void bootstrapAndJoinNode(Cluster cluster)
+    protected IInvokableInstance bootstrapAndJoinNode(Cluster cluster)
     {
         IInstanceConfig config = cluster.newInstanceConfig();
         config.set("auto_bootstrap", true);
@@ -261,6 +269,7 @@ public class TestBaseImpl extends DistributedTestBase
                      () -> newInstance.startup(cluster));
         newInstance.nodetoolResult("join").asserts().success();
         newInstance.nodetoolResult("cms", "describe").asserts().success(); // just make sure we're joined, remove later
+        return newInstance;
     }
 
     @SuppressWarnings("unchecked")

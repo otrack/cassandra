@@ -35,6 +35,7 @@ import org.apache.cassandra.io.sstable.SSTableIdentityIterator;
 import org.apache.cassandra.io.util.RandomAccessReader;
 import org.apache.cassandra.schema.TableMetadata;
 
+import static org.apache.cassandra.config.Config.DiskAccessMode;
 import static org.apache.cassandra.io.sstable.format.SSTableReader.PartitionPositionBounds;
 
 /// Simple SSTable scanner that reads sequentially through an SSTable without using the index.
@@ -47,6 +48,8 @@ implements ISSTableScanner
     private final AtomicBoolean isClosed = new AtomicBoolean(false);
     private final RandomAccessReader dfile;
     private final SSTableReader sstable;
+
+    private final TableMetadata tableMetadata;
 
     private final Iterator<PartitionPositionBounds> rangeIterator;
 
@@ -69,12 +72,14 @@ implements ISSTableScanner
     /// The ranges can be constructed by [SSTableReader#getPositionsForRanges] and similar methods as done by the
     /// various [SSTableReader#getScanner] variations.
     public SSTableSimpleScanner(SSTableReader sstable,
-                                Collection<PartitionPositionBounds> boundsList)
+                                Collection<PartitionPositionBounds> boundsList,
+                                DiskAccessMode diskAccessMode)
     {
         assert sstable != null;
 
-        this.dfile = sstable.openDataReaderForScan();
+        this.dfile = sstable.openDataReaderForScan(diskAccessMode);
         this.sstable = sstable;
+        this.tableMetadata = sstable.metadata();
         this.sizeInBytes = boundsList.stream().mapToLong(ppb -> ppb.upperPosition - ppb.lowerPosition).sum();
         this.compressedSizeInBytes = sstable.compression ? sstable.onDiskSizeForPartitionPositions(boundsList) : sizeInBytes;
         this.rangeIterator = boundsList.iterator();
@@ -124,6 +129,13 @@ implements ISSTableScanner
     public Set<SSTableReader> getBackingSSTables()
     {
         return ImmutableSet.of(sstable);
+    }
+
+    @Override
+    public boolean isFullRange()
+    {
+        // hasNext will init start and end
+        return hasNext() && currentStartPosition == 0 && currentEndPosition == sstable.uncompressedLength();
     }
 
     public TableMetadata metadata()
@@ -190,7 +202,7 @@ implements ISSTableScanner
         if (!hasNext())
             throw new NoSuchElementException();
 
-        currentIterator = SSTableIdentityIterator.create(sstable, dfile, false);
+        currentIterator = SSTableIdentityIterator.create(sstable, tableMetadata, dfile, false);
         DecoratedKey currentKey = currentIterator.partitionKey();
         if (lastKey != null && lastKey.compareTo(currentKey) >= 0)
         {

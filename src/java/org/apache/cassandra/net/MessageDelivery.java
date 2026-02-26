@@ -23,12 +23,14 @@ import java.util.Iterator;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+
 import javax.annotation.Nullable;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import accord.utils.Invariants;
+
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.exceptions.RequestFailure;
 import org.apache.cassandra.exceptions.RequestFailureReason;
@@ -174,7 +176,7 @@ public interface MessageDelivery
             public void onFailure(InetAddressAndPort from, RequestFailure failure)
             {
                 long retryDelay = backoff.computeWait(attempt + 1, NANOSECONDS);
-                // TODO (required): we already have a separate retry predicate, retries should not be taken into consideration when retrying
+                // TODO (expected): we already have a separate retry predicate, retries should not be taken into consideration when retrying
                 if (retryDelay < 0)
                 {
                     onResult.result(attempt, null, new GivingUpException(attempt, errorMessage.apply(attempt, ResponseFailureReason.GiveUp, from, failure)));

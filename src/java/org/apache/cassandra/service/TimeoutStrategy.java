@@ -26,10 +26,11 @@ import java.util.regex.Pattern;
 
 import javax.annotation.Nullable;
 
+import com.codahale.metrics.Snapshot;
 import com.google.common.annotations.VisibleForTesting;
 
 import accord.utils.Invariants;
-import com.codahale.metrics.Snapshot;
+
 import org.apache.cassandra.metrics.ClientRequestMetrics;
 import org.apache.cassandra.service.TimeoutStrategy.LatencySupplier.Constant;
 import org.apache.cassandra.service.TimeoutStrategy.LatencySupplier.Percentile;
@@ -85,7 +86,7 @@ public class TimeoutStrategy implements WaitStrategy
     static final Pattern WAIT = Pattern.compile(
                 "\\s*(?<const>0|[0-9]+[mu]?s)" +
                 "|\\s*((p(?<perc>[0-9]+)(\\((?<rw>r|w|rw|wr)\\))?)?|(?<constbase>0|[0-9]+[mu]?s))" +
-                    "\\s*(([*]\\s*(?<mod>[0-9.]+))?\\s*(?<modkind>[*^]\\s*attempts)?)?\\s*");
+                    "\\s*(([*]\\s*(?<mod>[0-9.]+))?\\s*(?<modkind>[*^]\\s*attempts?)?)?\\s*");
     static final Pattern TIME = Pattern.compile(
                 "0|[0-9]+[mu]?s");
 
@@ -97,7 +98,8 @@ public class TimeoutStrategy implements WaitStrategy
         default LatencyModifier identity() { return (l, a) -> l; }
         default LatencyModifier multiply(double constant) { return (l, a) -> saturatedCast(l * constant); }
         default LatencyModifier multiplyByAttempts(double multiply) { return (l, a) -> saturatedCast(l * multiply * a); }
-        default LatencyModifier multiplyByAttemptsExp(double base) { return (l, a) -> saturatedCast(l * pow(base, a)); }
+        // Ensure attempts is non-negative before subtracting 1.
+        default LatencyModifier multiplyByAttemptsExp(double base) { return (l, a) -> saturatedCast(l * pow(base, max(0, (max(a, 0) - 1)))); }
     }
 
     public interface Wait

@@ -28,6 +28,7 @@ import com.google.common.collect.ImmutableSet;
 
 import accord.local.Node;
 import accord.utils.SortedArrays.SortedArrayList;
+
 import org.apache.cassandra.dht.IPartitioner;
 import org.apache.cassandra.dht.Murmur3Partitioner;
 import org.apache.cassandra.dht.Range;
@@ -81,7 +82,7 @@ public class AccordTopologyUtils
         NodeId nodeId = nodeId(node);
         InetAddressAndPort ep = ep(node);
         NodeAddresses addresses = new NodeAddresses(nodeId.toUUID(), ep, ep, ep);
-        transformer.register(nodeId, addresses, LOCATION, NodeVersion.CURRENT);
+        transformer.unsafeRegisterForTesting(nodeId, addresses, LOCATION, NodeVersion.CURRENT);
         transformer.withNodeState(nodeId, NodeState.JOINED);
         transformer.proposeToken(nodeId, Collections.singleton(token));
         transformer.addToRackAndDC(nodeId);

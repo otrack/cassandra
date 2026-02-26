@@ -20,6 +20,7 @@ package org.apache.cassandra.journal;
 import java.nio.ByteBuffer;
 
 import accord.utils.Invariants;
+
 import org.apache.cassandra.concurrent.ExecutorPlus;
 import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.utils.concurrent.OpOrder;
@@ -66,7 +67,8 @@ public abstract class Segment<K, V> implements SelfRefCounted<Segment<K, V>>, Co
 
     abstract boolean isActive();
     abstract boolean isFlushed(long position);
-    boolean isStatic() { return !isActive(); }
+    public boolean isStatic() { return !isActive(); }
+    abstract boolean isEmpty();
 
     abstract ActiveSegment<K, V> asActive();
     abstract StaticSegment<K, V> asStatic();

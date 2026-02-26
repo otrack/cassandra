@@ -48,6 +48,7 @@ import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
+
 import javax.annotation.Nullable;
 import javax.management.MalformedObjectNameException;
 import javax.management.ObjectName;
@@ -61,6 +62,7 @@ import com.google.common.collect.Sets;
 import com.google.common.primitives.Ints;
 import com.google.common.primitives.Longs;
 import com.google.common.util.concurrent.RateLimiter;
+import com.googlecode.concurrenttrees.common.Iterables;
 
 import org.apache.commons.lang3.ArrayUtils;
 import org.apache.commons.lang3.StringUtils;
@@ -68,7 +70,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import accord.impl.progresslog.DefaultProgressLog;
-import com.googlecode.concurrenttrees.common.Iterables;
+
 import org.apache.cassandra.audit.AuditLogOptions;
 import org.apache.cassandra.auth.AllowAllInternodeAuthenticator;
 import org.apache.cassandra.auth.AuthConfig;
@@ -121,6 +123,8 @@ import org.apache.cassandra.security.EncryptionContext;
 import org.apache.cassandra.security.JREProvider;
 import org.apache.cassandra.security.SSLFactory;
 import org.apache.cassandra.service.CacheService.CacheType;
+import org.apache.cassandra.service.FileSystemOwnershipCheck;
+import org.apache.cassandra.service.StartupChecks;
 import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.service.accord.api.AccordWaitStrategies;
 import org.apache.cassandra.service.consensus.TransactionalMode;
@@ -217,6 +221,8 @@ public class DatabaseDescriptor
 
     private static DiskAccessMode commitLogWriteDiskAccessMode;
 
+    private static DiskAccessMode compactionReadDiskAccessMode;
+
     private static AbstractCryptoProvider cryptoProvider;
     private static IAuthenticator authenticator;
     private static IAuthorizer authorizer;
@@ -264,7 +270,7 @@ public class DatabaseDescriptor
      * The configuration for guardrails.
      */
     private static GuardrailsOptions guardrails;
-    private static StartupChecksOptions startupChecksOptions;
+    private static StartupChecksConfiguration startupChecksConfiguration;
 
     private static ImmutableMap<String, SSTableFormat<?, ?>> sstableFormats;
     private static volatile SSTableFormat<?, ?> selectedSSTableFormat;
@@ -657,6 +663,21 @@ public class DatabaseDescriptor
             indexAccessMode = conf.disk_access_mode;
         }
         logger.info("DiskAccessMode is {}, indexAccessMode is {}", conf.disk_access_mode, indexAccessMode);
+
+        if (DiskAccessMode.auto == conf.compaction_read_disk_access_mode)
+        {
+            compactionReadDiskAccessMode = conf.disk_access_mode;
+        }
+        else if (DiskAccessMode.direct == conf.compaction_read_disk_access_mode)
+        {
+            compactionReadDiskAccessMode = DiskAccessMode.direct;
+        }
+        else
+        {
+            throw new IllegalArgumentException("Unsupported disk access mode for compaction_read_disk_access_mode " +
+                                               "(options: direct/auto) " + conf.compaction_read_disk_access_mode);
+        }
+        logger.info("compaction_read_disk_access_mode resolved to: {}", compactionReadDiskAccessMode);
 
         /* phi convict threshold for FailureDetector */
         if (conf.phi_convict_threshold < 5 || conf.phi_convict_threshold > 16)
@@ -1220,6 +1241,22 @@ public class DatabaseDescriptor
         // run audit logging options through sanitation and validation
         if (conf.audit_logging_options != null)
             setAuditLoggingOptions(conf.audit_logging_options);
+
+        try
+        {
+            // Run through the validation by setting current values back to their setters, so we are sure that their values are valid.
+            // We are catching IllegalArgumentException and translating it to ConfigurationException to comply with
+            // rest of the logic in this method. These setters are also called in GCInspectorMXBean were IllegalArgumentException
+            // is thrown when arguments are invalid instead ConfigurationException, on purpose.
+            DatabaseDescriptor.setGCLogThreshold((int) DatabaseDescriptor.getGCLogThreshold());
+            DatabaseDescriptor.setGCWarnThreshold((int) DatabaseDescriptor.getGCWarnThreshold());
+            DatabaseDescriptor.setGCConcurrentPhaseLogThreshold(DatabaseDescriptor.getGCConcurrentPhaseLogThreshold());
+            DatabaseDescriptor.setGCConcurrentPhaseWarnThreshold(DatabaseDescriptor.getGCConcurrentPhaseWarnThreshold());
+        }
+        catch (IllegalArgumentException ex)
+        {
+            throw new ConfigurationException(ex.getMessage());
+        }
     }
 
     @VisibleForTesting
@@ -1320,14 +1357,22 @@ public class DatabaseDescriptor
         }
     }
 
-    public static StartupChecksOptions getStartupChecksOptions()
+    public static StartupChecksConfiguration getStartupChecksConfiguration()
     {
-        return startupChecksOptions;
+        return startupChecksConfiguration;
     }
 
     private static void applyStartupChecks()
     {
-        startupChecksOptions = new StartupChecksOptions(conf.startup_checks);
+        try
+        {
+            StartupChecks startupChecks = new StartupChecks().withDefaultTests().withTest(new FileSystemOwnershipCheck()).withServiceLoaderTests();
+            startupChecksConfiguration = new StartupChecksConfiguration(startupChecks, conf.startup_checks);
+        }
+        catch (Throwable t)
+        {
+            throw new ConfigurationException("Invalid configuration of startup_checks: " + t.getMessage());
+        }
     }
 
     private static String storagedirFor(String type)
@@ -1676,9 +1721,7 @@ public class DatabaseDescriptor
         // responsible for querying the cloud metadata service to get the public IP used for
         // broadcast_address and we only want to instantiate the snitch here.
         addressConfig.configureAddresses();
-        initializationLocator = new Locator(RegistrationStatus.instance,
-                                            FBUtilities.getBroadcastAddressAndPort(),
-                                            initialLocationProvider);
+        applyLocator();
         nodeProximity = conf.dynamic_snitch ? new DynamicEndpointSnitch(proximity) : proximity;
         localAddressReconnector = addressConfig.preferLocalConnections()
                                   ? new ReconnectableSnitchHelper(initializationLocator, true)
@@ -1691,6 +1734,14 @@ public class DatabaseDescriptor
     public static void applyFailureDetector()
     {
         newFailureDetector = () -> createFailureDetector(conf.failure_detector);
+    }
+
+    @VisibleForTesting
+    public static void applyLocator()
+    {
+        initializationLocator = new Locator(RegistrationStatus.instance,
+                                            FBUtilities.getBroadcastAddressAndPort(),
+                                            initialLocationProvider);
     }
 
     // definitely not safe for tools + clients - implicitly instantiates schema
@@ -1736,7 +1787,7 @@ public class DatabaseDescriptor
 
                 File commitLogLocationDir = new File(commitLogLocation);
                 PathUtils.createDirectoriesIfNotExists(commitLogLocationDir.toPath());
-                directIOSupported = FileUtils.getBlockSize(commitLogLocationDir) > 0;
+                directIOSupported = FileUtils.isDirectIOSupported(commitLogLocationDir);
             }
             catch (IOError | ConfigurationException ex)
             {
@@ -2194,6 +2245,16 @@ public class DatabaseDescriptor
     public static void setCredentialsCacheActiveUpdate(boolean update)
     {
         conf.credentials_cache_active_update = update;
+    }
+
+    public static int getMaxCommentLength()
+    {
+        return conf.max_comment_length;
+    }
+
+    public static int getMaxSecurityLabelLength()
+    {
+        return conf.max_security_label_length;
     }
 
     public static int getMaxValueSize()
@@ -3183,6 +3244,16 @@ public class DatabaseDescriptor
         return conf.max_mutation_size.toBytes();
     }
 
+    public static int getSSTablesPerReadLogThreshold()
+    {
+        return conf.sstables_per_read_log_threshold;
+    }
+
+    public static void setSSTablesPerReadLogThreshold(int threshold)
+    {
+        conf.sstables_per_read_log_threshold = threshold;
+    }
+
     public static int getTombstoneWarnThreshold()
     {
         return conf.tombstone_warn_threshold;
@@ -3242,6 +3313,18 @@ public class DatabaseDescriptor
     public static void setCommitLogSegmentSize(int sizeMebibytes)
     {
         conf.commitlog_segment_size = new DataStorageSpec.IntMebibytesBound(sizeMebibytes);
+    }
+
+    public static DiskAccessMode getCompactionReadDiskAccessMode()
+    {
+        return compactionReadDiskAccessMode;
+    }
+
+    @VisibleForTesting
+    public static void setCompactionReadDiskAccessMode(DiskAccessMode scanDiskAccessMode)
+    {
+        compactionReadDiskAccessMode = scanDiskAccessMode;
+        conf.compaction_read_disk_access_mode = scanDiskAccessMode;
     }
 
     /**
@@ -4361,6 +4444,26 @@ public class DatabaseDescriptor
         conf.counter_cache_keys_to_save = counterCacheKeysToSave;
     }
 
+    public static int getCompressionDictionaryRefreshIntervalSeconds()
+    {
+        return conf.compression_dictionary_refresh_interval.toSeconds();
+    }
+
+    public static int getCompressionDictionaryRefreshInitialDelaySeconds()
+    {
+        return conf.compression_dictionary_refresh_initial_delay.toSeconds();
+    }
+
+    public static int getCompressionDictionaryCacheSize()
+    {
+        return conf.compression_dictionary_cache_size;
+    }
+
+    public static int getCompressionDictionaryCacheExpireSeconds()
+    {
+        return conf.compression_dictionary_cache_expire.toSeconds();
+    }
+
     public static int getStreamingKeepAlivePeriod()
     {
         return conf.streaming_keep_alive_period.toSeconds();
@@ -4642,6 +4745,17 @@ public class DatabaseDescriptor
         conf.transient_replication_enabled = enabled;
     }
 
+    public static boolean cursorCompactionEnabled()
+    {
+        return conf.cursor_compaction_enabled;
+    }
+
+    @VisibleForTesting
+    public static void setCursorCompactionEnabled(boolean cursor_compaction_enabled)
+    {
+        conf.cursor_compaction_enabled = cursor_compaction_enabled;
+    }
+
     public static boolean enableDropCompactStorage()
     {
         return conf.drop_compact_storage_enabled;
@@ -4678,14 +4792,33 @@ public class DatabaseDescriptor
         return conf.gc_log_threshold.toMilliseconds();
     }
 
-    public static void setGCLogThreshold(int gcLogThreshold)
+    public static void setGCLogThreshold(int threshold)
     {
-        conf.gc_log_threshold = new DurationSpec.IntMillisecondsBound(gcLogThreshold);
+        validateGCParams(threshold, getGCWarnThreshold());
+        conf.gc_log_threshold = new DurationSpec.IntMillisecondsBound(threshold);
+    }
+
+    public static void validateGCParams(long logThreshold, long warnThreshold)
+    {
+        if (logThreshold <= 0)
+            throw new IllegalArgumentException("Threshold value for gc_log*_threshold must be greater than 0");
+        if (logThreshold > Integer.MAX_VALUE)
+            throw new IllegalArgumentException("Threshold value for gc_log*_threshold must be less than Integer.MAX_VALUE");
+
+        if (warnThreshold <= 0)
+            throw new IllegalArgumentException("Threshold value for gc_warn*_threshold must be greater than 0");
+        if (warnThreshold > Integer.MAX_VALUE)
+            throw new IllegalArgumentException("Threshold value for gc_warn*_threshold must be less than Integer.MAX_VALUE");
+
+        if (warnThreshold != 0 && logThreshold > warnThreshold)
+            throw new IllegalArgumentException("Threshold value for gc_log*_threshold (" + logThreshold + ") must be less than gc_warn*_threshold which is currently "
+                    + warnThreshold);
     }
 
     public static EncryptionContext getEncryptionContext()
     {
         return encryptionContext;
+
     }
 
     public static long getGCWarnThreshold()
@@ -4693,9 +4826,56 @@ public class DatabaseDescriptor
         return conf.gc_warn_threshold.toMilliseconds();
     }
 
-    public static void setGCWarnThreshold(int threshold)
+    public static void setGCWarnThreshold(long threshold)
     {
+        if (threshold < 0)
+            throw new IllegalArgumentException("Threshold value for gc_warn_threshold must be greater than or equal to 0");
+
+        if (threshold > Integer.MAX_VALUE)
+            throw new IllegalArgumentException("Threshold must be less than Integer.MAX_VALUE");
+
+        long gcLogThresholdInMs = getGCLogThreshold();
+        if (threshold != 0 && threshold <= gcLogThresholdInMs)
+            throw new IllegalArgumentException("Threshold value for gc_warn_threshold (" + threshold + ") must be greater than gc_log_threshold which is currently "
+                                               + gcLogThresholdInMs);
+
         conf.gc_warn_threshold = new DurationSpec.IntMillisecondsBound(threshold);
+    }
+
+    public static int getGCConcurrentPhaseLogThreshold()
+    {
+        return conf.gc_concurrent_phase_log_threshold.toMilliseconds();
+    }
+
+    public static void setGCConcurrentPhaseLogThreshold(int threshold)
+    {
+        if (threshold <= 0)
+            throw new IllegalArgumentException("Threshold must be greater than 0");
+
+        long gcConcurrentPhaseWarnThresholdInMs = getGCConcurrentPhaseWarnThreshold();
+        if (gcConcurrentPhaseWarnThresholdInMs != 0 && threshold > gcConcurrentPhaseWarnThresholdInMs)
+            throw new IllegalArgumentException("Threshold value for gc_concurrent_phase_log_threshold (" + threshold + ") must be less than gc_concurrent_phase_warn_threshold which is currently "
+                                               + gcConcurrentPhaseWarnThresholdInMs);
+
+        conf.gc_concurrent_phase_log_threshold = new DurationSpec.IntMillisecondsBound(threshold);
+    }
+
+    public static int getGCConcurrentPhaseWarnThreshold()
+    {
+        return conf.gc_concurrent_phase_warn_threshold.toMilliseconds();
+    }
+
+    public static void setGCConcurrentPhaseWarnThreshold(int threshold)
+    {
+        if (threshold < 0)
+            throw new IllegalArgumentException("Threshold value for gc_concurrent_phase_warn_threshold must be greater than or equal to 0");
+
+        long gcConcurrentPhaseLogThresholdInMs = getGCConcurrentPhaseLogThreshold();
+        if (threshold != 0 && threshold <= gcConcurrentPhaseLogThresholdInMs)
+            throw new IllegalArgumentException("Threshold value for gc_concurrent_phase_warn_threshold (" + threshold + ") must be greater than gc_concurrent_phase_log_threshold which is currently "
+                                               + gcConcurrentPhaseLogThresholdInMs);
+
+        conf.gc_concurrent_phase_warn_threshold = new DurationSpec.IntMillisecondsBound(threshold);
     }
 
     public static boolean isCDCEnabled()
@@ -5370,7 +5550,7 @@ public class DatabaseDescriptor
 
     public static boolean getAccordTransactionsEnabled()
     {
-        return conf == null ? false : conf.accord.enabled;
+        return conf != null && conf.accord.enabled;
     }
 
     public static void setAccordTransactionsEnabled(boolean b)
@@ -5801,6 +5981,16 @@ public class DatabaseDescriptor
         conf.sai_options.prioritize_over_legacy_index = value;
     }
 
+    public static boolean getForceOptimizedIndexStatusFormat()
+    {
+        return conf.force_optimized_index_status_format;
+    }
+
+    public static void setForceOptimizedIndexStatusFormat(boolean value)
+    {
+        conf.force_optimized_index_status_format = value;
+    }
+
     public static RepairRetrySpec getRepairRetrySpec()
     {
         return conf == null ? new RepairRetrySpec() : conf.repair.retries;
@@ -5923,9 +6113,14 @@ public class DatabaseDescriptor
         return conf.triggers_policy;
     }
 
-    public static boolean isPasswordValidatorReconfigurationEnabled()
+    public static boolean isPasswordPolicyReconfigurationEnabled()
     {
-        return conf.password_validator_reconfiguration_enabled;
+        return conf.password_policy_reconfiguration_enabled;
+    }
+
+    public static boolean isRoleNamePolicyReconfigurationEnabled()
+    {
+        return conf.role_name_policy_reconfiguration_enabled;
     }
 
     public static Config.TombstonesMetricGranularity getPurgeableTobmstonesMetricGranularity()
@@ -5978,5 +6173,15 @@ public class DatabaseDescriptor
     public static void setPartitioner(String name)
     {
         partitioner = FBUtilities.newPartitioner(name);
+    }
+
+    public static boolean getGossipQuarantineDisabled()
+    {
+        return conf.gossip_quarantine_disabled;
+    }
+
+    public static void setGossipQuarantineDisabled(boolean disabled)
+    {
+        conf.gossip_quarantine_disabled = disabled;
     }
 }

@@ -22,9 +22,13 @@ import java.io.IOException;
 import java.util.AbstractList;
 import java.util.Arrays;
 import java.util.Comparator;
+import java.util.List;
+
+import com.google.common.annotations.VisibleForTesting;
 
 import accord.utils.Invariants;
 import accord.utils.SortedArrays;
+
 import org.apache.cassandra.db.TypeSizes;
 import org.apache.cassandra.exceptions.UnknownTableException;
 import org.apache.cassandra.io.util.DataInputPlus;
@@ -97,6 +101,14 @@ public abstract class TableMetadatas extends AbstractList<TableId>
     public static Complete of(TableMetadata metadata)
     {
         return new One(metadata);
+    }
+
+    @VisibleForTesting
+    public static Complete of(List<TableMetadata> values)
+    {
+        Collector collector = new Collector();
+        collector.addAll(values);
+        return collector.build();
     }
 
     public static Complete ofSortedUnique(TableMetadata ... metadatas)

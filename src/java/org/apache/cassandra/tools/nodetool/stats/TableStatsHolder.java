@@ -20,21 +20,30 @@ package org.apache.cassandra.tools.nodetool.stats;
 
 import java.text.DateFormat;
 import java.text.SimpleDateFormat;
-import java.util.*;
-
-import com.google.common.collect.ArrayListMultimap;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.TimeZone;
 
 import javax.management.InstanceNotFoundException;
 
+import com.google.common.collect.ArrayListMultimap;
+
 import org.apache.commons.lang3.time.DurationFormatUtils;
 
-import org.apache.cassandra.db.*;
+import org.apache.cassandra.db.ColumnFamilyStoreMBean;
 import org.apache.cassandra.db.compaction.TimeWindowCompactionStrategy;
 import org.apache.cassandra.db.compaction.TimeWindowCompactionStrategyOptions;
-import org.apache.cassandra.io.util.*;
-import org.apache.cassandra.metrics.*;
+import org.apache.cassandra.io.util.FileUtils;
+import org.apache.cassandra.metrics.CassandraMetricsRegistry;
 import org.apache.cassandra.schema.SchemaConstants;
-import org.apache.cassandra.tools.*;
+import org.apache.cassandra.tools.NodeProbe;
 
 public class TableStatsHolder implements StatsHolder
 {
@@ -124,6 +133,15 @@ public class TableStatsHolder implements StatsHolder
         mpTable.put("old_sstable_count", table.oldSSTableCount);
         mpTable.put("sstables_in_each_level", table.sstablesInEachLevel);
         mpTable.put("sstable_bytes_in_each_level", table.sstableBytesInEachLevel);
+        if (table.isUCSSstable)
+        {
+            mpTable.put("sstable_avg_token_space_in_each_level", table.sstableAvgTokenSpaceInEachLevel);
+            mpTable.put("sstable_max_density_threshold_in_each_level", table.sstableMaxDensityThresholdInEachLevel);
+            mpTable.put("sstable_avg_size_in_each_level", table.sstableAvgSizeInEachLevel);
+            mpTable.put("sstable_avg_density_in_each_level", table.sstableAvgDensityInEachLevel);
+            mpTable.put("sstable_avg_density_max_density_threshold_ratio_in_each_level", table.sstableAvgDensityMaxDensityThresholdRatioInEachLevel);
+            mpTable.put("sstable_max_density_max_density_threshold_ratio_in_each_level", table.sstableMaxDensityMaxDensityThresholdRatioInEachLevel);
+        }
         mpTable.put("max_sstable_size", table.maxSSTableSize);
         mpTable.put("twcs", table.twcs);
         mpTable.put("space_used_live", table.spaceUsedLive);
@@ -156,6 +174,8 @@ public class TableStatsHolder implements StatsHolder
             mpTable.put("bloom_filter_off_heap_memory_used", table.bloomFilterOffHeapMemoryUsed);
         if (table.indexSummaryOffHeapUsed)
             mpTable.put("index_summary_off_heap_memory_used", table.indexSummaryOffHeapMemoryUsed);
+        if (table.compressionDictionariesUsed)
+            mpTable.put("compression_dictionaries_memory_used", table.compressionDictionariesMemoryUsed);
         if (table.compressionMetadataOffHeapUsed)
             mpTable.put("compression_metadata_off_heap_memory_used",
                         table.compressionMetadataOffHeapMemoryUsed);
@@ -275,6 +295,18 @@ public class TableStatsHolder implements StatsHolder
                     }
                 }
 
+                addUCSMetric(statsTable, statsTable.sstableAvgTokenSpaceInEachLevel, table.getPerLevelAvgTokenSpace());
+
+                addUCSMetric(statsTable, statsTable.sstableMaxDensityThresholdInEachLevel, table.getPerLevelMaxDensityThreshold());
+
+                addUCSMetric(statsTable, statsTable.sstableAvgSizeInEachLevel, table.getPerLevelAvgSize());
+
+                addUCSMetric(statsTable, statsTable.sstableAvgDensityInEachLevel, table.getPerLevelAvgDensity());
+
+                addUCSMetric(statsTable, statsTable.sstableAvgDensityMaxDensityThresholdRatioInEachLevel, table.getPerLevelAvgDensityMaxDensityThresholdRatio());
+
+                addUCSMetric(statsTable, statsTable.sstableMaxDensityMaxDensityThresholdRatioInEachLevel, table.getPerLevelMaxDensityMaxDensityThresholdRatio());
+
                 if (locationCheck)
                     statsTable.isInCorrectLocation = !table.hasMisplacedSSTables();
 
@@ -282,6 +314,7 @@ public class TableStatsHolder implements StatsHolder
                 Long bloomFilterOffHeapSize = null;
                 Long indexSummaryOffHeapSize = null;
                 Long compressionMetadataOffHeapSize = null;
+                Long compressionDictionariesMemoryUsed = null;
                 Long offHeapSize = null;
                 Double percentRepaired = null;
                 Long bytesRepaired = null;
@@ -295,6 +328,7 @@ public class TableStatsHolder implements StatsHolder
                     memtableOffHeapSize = (Long) probe.getColumnFamilyMetric(keyspaceName, tableName, "MemtableOffHeapSize");
                     bloomFilterOffHeapSize = (Long) probe.getColumnFamilyMetric(keyspaceName, tableName, "BloomFilterOffHeapMemoryUsed");
                     indexSummaryOffHeapSize = (Long) probe.getColumnFamilyMetric(keyspaceName, tableName, "IndexSummaryOffHeapMemoryUsed");
+                    compressionDictionariesMemoryUsed = (Long) probe.getColumnFamilyMetric(keyspaceName, tableName, "CompressionDictionariesMemoryUsed");
                     compressionMetadataOffHeapSize = (Long) probe.getColumnFamilyMetric(keyspaceName, tableName, "CompressionMetadataOffHeapMemoryUsed");
                     offHeapSize = memtableOffHeapSize + bloomFilterOffHeapSize + indexSummaryOffHeapSize + compressionMetadataOffHeapSize;
                     percentRepaired = (Double) probe.getColumnFamilyMetric(keyspaceName, tableName, "PercentRepaired");
@@ -380,6 +414,11 @@ public class TableStatsHolder implements StatsHolder
                     statsTable.indexSummaryOffHeapUsed = true;
                     statsTable.indexSummaryOffHeapMemoryUsed = FileUtils.stringifyFileSize(indexSummaryOffHeapSize, humanReadable);
                 }
+                if (compressionDictionariesMemoryUsed != null)
+                {
+                    statsTable.compressionDictionariesUsed = true;
+                    statsTable.compressionDictionariesMemoryUsed = FileUtils.stringifyFileSize(compressionDictionariesMemoryUsed, humanReadable);
+                }
                 if (compressionMetadataOffHeapSize != null)
                 {
                     statsTable.compressionMetadataOffHeapUsed = true;
@@ -444,6 +483,18 @@ public class TableStatsHolder implements StatsHolder
                 statsKeyspace.tables.add(statsTable);
             }
             keyspaces.add(statsKeyspace);
+        }
+    }
+
+    private void addUCSMetric(StatsTable statsTable, List<String> acc, double[] values)
+    {
+        if (values != null)
+        {
+            statsTable.isUCSSstable = true;
+            for (int level = 0; level < values.length; level++)
+            {
+                acc.add(String.format("%.03f", values[level]));
+            }
         }
     }
 

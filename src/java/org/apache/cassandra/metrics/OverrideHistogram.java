@@ -19,9 +19,10 @@
 package org.apache.cassandra.metrics;
 
 import com.codahale.metrics.Snapshot;
+
 import org.agrona.UnsafeAccess;
 
-public abstract class OverrideHistogram extends CassandraHistogram
+public class OverrideHistogram extends com.codahale.metrics.Histogram
 {
     private static final CassandraReservoir NO_RESERVOIR = new CassandraReservoir() {
         @Override public Snapshot getPercentileSnapshot() { return null; }
@@ -34,10 +35,10 @@ public abstract class OverrideHistogram extends CassandraHistogram
 
     protected OverrideHistogram()
     {
-        super(NO_RESERVOIR);
+        this(NO_RESERVOIR);
         try
         {
-            UnsafeAccess.UNSAFE.putObject(this, UnsafeAccess.UNSAFE.objectFieldOffset(CassandraHistogram.class.getDeclaredField("count")), null);
+            UnsafeAccess.UNSAFE.putObject(this, UnsafeAccess.UNSAFE.objectFieldOffset(com.codahale.metrics.Histogram.class.getDeclaredField("count")), null);
         }
         catch (Throwable t)
         {
@@ -45,6 +46,25 @@ public abstract class OverrideHistogram extends CassandraHistogram
         }
     }
 
-    public abstract CassandraReservoir.BucketStrategy bucketStrategy();
-    public abstract long[] bucketStarts(int length);
+    final CassandraReservoir reservoir;
+    protected OverrideHistogram(CassandraReservoir reservoir)
+    {
+        super(reservoir);
+        this.reservoir = reservoir;
+    }
+
+    public CassandraReservoir.BucketStrategy bucketStrategy()
+    {
+        return reservoir.bucketStrategy();
+    }
+
+    public long[] bucketStarts(int length)
+    {
+        return reservoir.buckets(length);
+    }
+
+    public boolean isCumulative()
+    {
+        return true;
+    }
 }
