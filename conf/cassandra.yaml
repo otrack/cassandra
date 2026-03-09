@@ -2745,6 +2745,9 @@ accord:
  # how quickly the fast path is reconfigured when nodes go up/down
  fast_path_update_delay: 5s
 
+ # Non fault-tolerant reads
+ accord.ephemeral_reads_enabled: true
+ 
 # Prevents preparing a repair session or beginning a repair streaming session if pending compactions is over
 # the given value.  Defaults to disabled.
 # reject_repair_compaction_threshold: 1024
