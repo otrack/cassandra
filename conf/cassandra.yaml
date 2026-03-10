@@ -644,7 +644,7 @@ counter_cache_save_period: 7200s
 # milliseconds.
 commitlog_sync: periodic
 # Min unit: ms
-commitlog_sync_period: 10000ms
+commitlog_sync_period: 10000000ms
 
 # When in periodic commitlog mode, the number of milliseconds to block writes
 # while waiting for a slow disk flush to complete.
@@ -1039,7 +1039,7 @@ start_native_transport: true
 native_transport_port: 9042
 # The maximum threads for handling requests (note that idle threads are stopped
 # after 30 seconds so there is not corresponding minimum setting).
-# native_transport_max_threads: 128
+native_transport_max_threads: 1024
 # The maximum threads for handling auth requests in a separate executor from main request executor.
 # When set to 0, main executor for requests is used.
 # native_transport_max_auth_threads: 4
@@ -1932,7 +1932,7 @@ internode_compression: dc
 # Disabling it will result in larger (but fewer) network packets being sent,
 # reducing overhead from the TCP protocol itself, at the cost of increasing
 # latency if you block for cross-datacenter responses.
-inter_dc_tcp_nodelay: false
+inter_dc_tcp_nodelay: true
 
 # TTL for different trace types used during logging of the repair process.
 # Min unit: s
@@ -2147,15 +2147,15 @@ audit_logging_options:
 
 # default options for full query logging - these can be overridden from command line when executing
 # nodetool enablefullquerylog
-# full_query_logging_options:
-  # log_dir:
+full_query_logging_options:
+  log_dir: /tmp/tmpfs/query
   # roll_cycle: FAST_HOURLY
   # block: true
   # max_queue_weight: 268435456 # 256 MiB
   # max_log_size: 17179869184 # 16 GiB
-  ## archive command is "/path/to/script.sh %path" where %path is replaced with the file being rolled:
+  # archive command is "/path/to/script.sh %path" where %path is replaced with the file being rolled:
   # archive_command:
-  ## note that enabling this allows anyone with JMX/nodetool access to run local shell commands as the user running cassandra
+  # note that enabling this allows anyone with JMX/nodetool access to run local shell commands as the user running cassandra
   # allow_nodetool_archive_command: false
   # max_archive_retries: 10
 
@@ -2726,25 +2726,28 @@ max_security_label_length: 48
 #
 storage_compatibility_mode: NONE
 
-#accord:
-#  # Enables the execution of Accord (multi-key) transactions on this node.
-#  enabled: false
-#
-#  # Journal directory for Accord
-#  journal_directory:
-#
-#  # The number of Accord shards on this node; -1 means use the number of cores
-#  queue_shard_count: -1
-#
-#  # The number of Accord shards on this node; -1 means use the number of cores
-#  command_store_shard_count: -1
-#
-#  # Recover delay: the time between a transaction being initiated and a remote replica being willing to interrupt it to complete it
-#  recover_delay: 1s
-#
-#  # how quickly the fast path is reconfigured when nodes go up/down
-#  fast_path_update_delay: 5s
+accord:
+ # Enables the execution of Accord (multi-key) transactions on this node.
+ enabled: true
 
+ # Journal directory for Accord
+ journal_directory: /tmp/tmpfs/accord
+
+ # The number of Accord shards on this node; -1 means use the number of cores
+ queue_shard_count: -1
+
+ # The number of Accord shards on this node; -1 means use the number of cores
+ command_store_shard_count: -1
+
+ # Recover delay: the time between a transaction being initiated and a remote replica being willing to interrupt it to complete it
+ # recover_delay: 1s
+
+ # how quickly the fast path is reconfigured when nodes go up/down
+ fast_path_update_delay: 5s
+
+ # Non fault-tolerant reads
+ ephemeral_read_enabled: true
+ 
 # Prevents preparing a repair session or beginning a repair streaming session if pending compactions is over
 # the given value.  Defaults to disabled.
 # reject_repair_compaction_threshold: 1024
