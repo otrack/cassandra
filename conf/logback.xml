@@ -129,7 +129,7 @@ appender reference in the root level section below.
     <!-- <appender-ref ref="SLOW_QUERIES_APPENDER"/> -->
   </logger>
 
-  <root level="INFO">
+  <root level="OFF">
     <appender-ref ref="SYSTEMLOG" />
     <appender-ref ref="STDOUT" />
     <appender-ref ref="ASYNCDEBUGLOG" /> <!-- Comment this line to disable debug.log -->
@@ -141,5 +141,5 @@ appender reference in the root level section below.
     -->
   </root>
 
-  <logger name="org.apache.cassandra" level="DEBUG"/>
+  <logger name="org.apache.cassandra" level="OFF"/>
 </configuration>
