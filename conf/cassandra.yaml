@@ -1047,7 +1047,7 @@ start_native_transport: true
 native_transport_port: 9042
 # The maximum threads for handling requests (note that idle threads are stopped
 # after 30 seconds so there is not corresponding minimum setting).
-native_transport_max_threads: 1024
+native_transport_max_threads: 2048
 # The maximum threads for handling auth requests in a separate executor from main request executor.
 # When set to 0, main executor for requests is used.
 # native_transport_max_auth_threads: 4
