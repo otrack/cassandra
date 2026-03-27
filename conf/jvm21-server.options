@@ -28,8 +28,8 @@
 
 
 ### Generational ZGC settings
--XX:+UseZGC
--XX:+ZGenerational
+#-XX:+UseZGC
+# -XX:+ZGenerational
 
 # Temporary workaround for jamm's incorrect default CompressedOops; if you're using ZGC this needs to be set
 -XX:-UseCompressedOops
@@ -51,8 +51,8 @@
 
 ### G1 Settings
 ## Use the Hotspot garbage-first collector.
-#-XX:+UseG1GC
-#-XX:+ParallelRefProcEnabled
+-XX:+UseG1GC
+-XX:+ParallelRefProcEnabled
 #-XX:MaxTenuringThreshold=2
 #-XX:G1HeapRegionSize=16m
 
@@ -142,5 +142,10 @@
 
 # Need to explicitly allow security manager on JDK21; deprecated for removal
 -Djava.security.manager=allow
+
+-Dcom.sun.management.jmxremote
+-Dcom.sun.management.jmxremote.port=9010
+-Dcom.sun.management.jmxremote.authenticate=false
+-Dcom.sun.management.jmxremote.ssl=false
 
 # The newline in the end of file is intentional
