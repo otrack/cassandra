@@ -2880,7 +2880,7 @@ accord:
  fast_path_update_delay: 5s
 
  # Non fault-tolerant reads
-#  ephemeral_read_enabled: true # FIXME
+ ephemeral_reads: true
  
 # Prevents preparing a repair session or beginning a repair streaming session if pending compactions is over
 # the given value.  Defaults to disabled.
